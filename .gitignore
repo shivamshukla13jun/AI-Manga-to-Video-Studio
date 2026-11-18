@@ -45,3 +45,24 @@ package-lock.json
 build/
 
 
+
+# real environment files — only .env.example is committed
+.env
+.env.development
+.env.staging
+.env.production
+
+# credentials
+src/libs/firebase/firebase-adminsdk.json
+*serviceAccount*.json
+
+# studio scratch space / local model weights
+tmp/
+ai-service/models/
+ai-service/.venv/
+
+# suwayomi container volume data
+data/
+# remotion / render artifacts
+render-checkpoints/
+video-renderer/node_modules/

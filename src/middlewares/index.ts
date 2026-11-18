@@ -70,9 +70,7 @@ export class Middleware {
     static requestValidate = (schema: z.ZodSchema) => {
         const mw = async (req: Request, res: Response, next: NextFunction) => {
             try {
-                console.info('Original Request Body:', req.body);
                 req.body = await schema.parseAsync(req.body);
-                console.info('New Request Body:', req.body);
                 next();
             } catch (err: any) {
                 next(err);

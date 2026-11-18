@@ -1,0 +1,17 @@
+{
+  "version": "gemini-2026-11-17",
+  "sourceUrl": "https://ai.google.dev/gemini-api/docs/pricing",
+  "lastVerified": "2026-11-17",
+  "notes": "Copied from the official Gemini Developer API pricing page (Paid tier, USD per 1M tokens). TTS audio output: $9.00/1M = $0.00225 per 10 s → 25 audio tokens per second. Free tier is free of charge but rate-limited and may use data to improve products.",
+  "entries": [
+    { "provider": "gemini", "model": "gemini-3.8-flash", "kind": "text", "tier": "standard", "inputPerMillion": 0.75, "outputPerMillion": 3.75, "effectiveFrom": "2026-01-01", "effectiveTo": "2027-01-01" },
+    { "provider": "gemini", "model": "gemini-3.8-flash", "kind": "text", "tier": "standard", "inputPerMillion": 1.5, "outputPerMillion": 7.5, "effectiveFrom": "2027-01-01" },
+    { "provider": "gemini", "model": "gemini-3.8-flash", "kind": "text", "tier": "batch", "inputPerMillion": 0.375, "outputPerMillion": 1.875, "effectiveFrom": "2026-01-01", "effectiveTo": "2027-01-01", "notes": "Batch = 50% of standard" },
+    { "provider": "gemini", "model": "gemini-3.8-flash-tts", "kind": "tts", "tier": "standard", "inputPerMillion": 0.5, "outputPerMillion": 9.0, "audioTokensPerSecond": 25, "effectiveFrom": "2026-01-01", "effectiveTo": "2027-01-01" },
+    { "provider": "gemini", "model": "gemini-3.8-flash-tts", "kind": "tts", "tier": "standard", "inputPerMillion": 1.0, "outputPerMillion": 18.0, "audioTokensPerSecond": 25, "effectiveFrom": "2027-01-01" },
+    { "provider": "gemini", "model": "gemini-3.8-flash-tts", "kind": "tts", "tier": "batch", "inputPerMillion": 0.25, "outputPerMillion": 4.5, "audioTokensPerSecond": 25, "effectiveFrom": "2026-01-01", "effectiveTo": "2027-01-01" },
+    { "provider": "gemini", "model": "gemini-3.8-flash-lite-tts", "kind": "tts", "tier": "standard", "inputPerMillion": 0.5, "outputPerMillion": 6.0, "audioTokensPerSecond": 25, "effectiveFrom": "2026-01-01", "effectiveTo": "2027-01-01" },
+    { "provider": "gemini", "model": "gemini-3.8-flash-lite-tts", "kind": "tts", "tier": "standard", "inputPerMillion": 1.0, "outputPerMillion": 12.0, "audioTokensPerSecond": 25, "effectiveFrom": "2027-01-01" },
+    { "provider": "gemini", "model": "gemini-3.8-flash-lite-tts", "kind": "tts", "tier": "batch", "inputPerMillion": 0.25, "outputPerMillion": 3.0, "audioTokensPerSecond": 25, "effectiveFrom": "2026-01-01", "effectiveTo": "2027-01-01" }
+  ]
+}

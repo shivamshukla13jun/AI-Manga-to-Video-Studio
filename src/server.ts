@@ -6,6 +6,7 @@ import { applyBaseSetup } from "./baseSetup/ExpressSetup";
 import initializeServices from "baseSetup/initilizeServices";
 import config, { NODE_ENV } from "config/env";
 import { setupSwagger } from "utils/swagger";
+import { initRealtime } from "libs/realtime/socket";
 
 const app: Express = express();
 const attemptDatabaseConnection = async (): Promise<void> => {
@@ -27,11 +28,15 @@ const attemptDatabaseConnection = async (): Promise<void> => {
     app.use(errorHandler);
 
     // Start the server
-    app.listen(config.PORT, () => {
+    const server = app.listen(config.PORT, () => {
       console.log(`🚀 Server is running on port ${config.PORT}`);
       console.log(`🌍 Environment: ${NODE_ENV}`);
       console.log(`📘 Swagger UI available at http://localhost:${config.PORT}/api-docs`);
     });
+    // long uploads/renders: don't cut slow connections at Node's default timeouts
+    server.requestTimeout = 0;
+    server.headersTimeout = 120_000;
+    await initRealtime(server).catch((error) => console.error("❌ Socket.IO failed to start", error));
 
   } catch (err) {
     console.error(`❌ Error to estab;lish server`, err);

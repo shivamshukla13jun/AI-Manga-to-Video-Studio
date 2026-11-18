@@ -1,10 +1,16 @@
+import fs from 'fs';
 import path from 'path';
+import { pipeline } from 'stream/promises';
 import { v4 as uuidv4 } from 'uuid';
 import config from 'config/env';
+import { ensureDirectoryExists } from 'libs';
 import { admin, firebaseApp } from 'libs/firebase/firebase';
 import { AppError } from 'middlewares/error';
 import type {
+  ByteRange,
   IStorageProvider,
+  PutFileOptions,
+  StoredObjectStream,
   UploadedFileResult,
   UploadOptions,
 } from '../types';
@@ -27,13 +33,17 @@ class FirebaseStorageProvider implements IStorageProvider {
       .bucket(config.FIREBASE_STORAGE_BUCKET);
   }
 
+  private newKey(folder: string | undefined, originalName: string) {
+    const clean = folder ? folder.replace(/^\/+|\/+$/g, '') : '';
+    const ext = path.extname(originalName);
+    return clean ? `${clean}/${uuidv4()}${ext}` : `${uuidv4()}${ext}`;
+  }
+
   async upload(
     file: Express.Multer.File,
     options?: UploadOptions
   ): Promise<UploadedFileResult> {
-    const folder = options?.folder ? options.folder.replace(/^\/+|\/+$/g, '') : '';
-    const ext = path.extname(file.originalname);
-    const key = folder ? `${folder}/${uuidv4()}${ext}` : `${uuidv4()}${ext}`;
+    const key = this.newKey(options?.folder, file.originalname);
 
     const bucketFile = this.bucket.file(key);
     await bucketFile.save(file.buffer, {
@@ -48,6 +58,40 @@ class FirebaseStorageProvider implements IStorageProvider {
       size: file.size,
       mimetype: file.mimetype,
       originalName: file.originalname,
+    };
+  }
+
+  async putFile(localPath: string, options: PutFileOptions): Promise<UploadedFileResult> {
+    const key = this.newKey(options.folder, options.originalName.toLowerCase());
+    await this.bucket.upload(localPath, {
+      destination: key,
+      resumable: true,
+      metadata: { contentType: options.mimetype },
+    });
+    if (!options.private) await this.bucket.file(key).makePublic();
+    const { size } = await fs.promises.stat(localPath);
+    return {
+      key,
+      url: this.getUrl(key),
+      provider: this.name,
+      size,
+      mimetype: options.mimetype,
+      originalName: options.originalName,
+    };
+  }
+
+  async getFile(key: string, localPath: string): Promise<void> {
+    ensureDirectoryExists(path.dirname(localPath));
+    await pipeline(this.bucket.file(key).createReadStream(), fs.createWriteStream(localPath));
+  }
+
+  async openRead(key: string, range?: ByteRange): Promise<StoredObjectStream> {
+    const file = this.bucket.file(key);
+    const [metadata] = await file.getMetadata();
+    return {
+      stream: file.createReadStream(range ? { start: range.start, end: range.end } : {}),
+      size: Number(metadata.size),
+      contentType: metadata.contentType,
     };
   }
 

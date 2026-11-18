@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import User,{IUserDocument} from "../../models/user.model";
 import { AppError } from "middlewares/error";
+import { Role } from "./types";
 import crypto from "crypto";
 import { generateAccessToken, generateRefreshToken, saveTokenToDatabase, getTokenExpirationSeconds, revokeToken, verifyToken } from "libs/jwt";
 
@@ -12,7 +13,9 @@ import { generateAccessToken, generateRefreshToken, saveTokenToDatabase, getToke
 const registerUser =
   async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const user = await User.create(req.body);
+      // Public self-registration can never choose its own role
+      const { confirmPassword: _confirm, role: _role, ...payload } = req.body;
+      const user = await User.create({ ...payload, role: Role.USER });
       res.status(201).json({ data: user, success: true, statusCode: 201 });
     } catch (error) {
       console.warn(error)

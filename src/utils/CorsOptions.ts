@@ -14,8 +14,8 @@ const corsOptions = {
   },
   credentials: config.CORS_CREDENTIALS, // Allow credentials (cookies, authorization headers, etc.)
 
-  methods: ['GET', 'POST', 'PUT', 'DELETE'], // Allowed methods
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'companyid', 'isencrypted', 'x-ek'], // Allowed headers
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'], // Allowed methods
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'companyid', 'isencrypted', 'x-ek', 'Range'], // Allowed headers
 };
 
 export { corsOptions }

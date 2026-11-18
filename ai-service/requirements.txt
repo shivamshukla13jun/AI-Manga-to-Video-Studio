@@ -1,0 +1,9 @@
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+pydantic>=2.7,<3.0
+
+# ---- optional engines (install what you need) ----
+# piper-tts>=1.2,<2.0          # Piper voices: place .onnx files in ./voices
+# kokoro>=0.9,<1.0             # Kokoro TTS (also needs: soundfile, misaki[en] or misaki[hi])
+# soundfile>=0.12,<1.0
+# TTS>=0.22,<1.0               # Coqui XTTS-v2 (large; GPU recommended)

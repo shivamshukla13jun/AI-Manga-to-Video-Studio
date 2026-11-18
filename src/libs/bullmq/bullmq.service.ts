@@ -110,6 +110,11 @@ class BullMQService {
     }
   }
 
+  /** Connection options for workers created outside this service */
+  getConnection(): RedisConnection {
+    return { ...this.redisConnection };
+  }
+
   getQueue(queueName: string): Queue | undefined {
     return this.queues.get(queueName);
   }

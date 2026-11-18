@@ -1,14 +1,22 @@
+import fs from 'fs';
 import path from 'path';
+import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 import { v4 as uuidv4 } from 'uuid';
 import {
   S3Client,
   PutObjectCommand,
   DeleteObjectCommand,
+  GetObjectCommand,
 } from '@aws-sdk/client-s3';
 import config from 'config/env';
+import { ensureDirectoryExists } from 'libs';
 import { AppError } from 'middlewares/error';
 import type {
+  ByteRange,
   IStorageProvider,
+  PutFileOptions,
+  StoredObjectStream,
   UploadedFileResult,
   UploadOptions,
 } from '../types';
@@ -45,13 +53,17 @@ class S3StorageProvider implements IStorageProvider {
     });
   }
 
+  private newKey(folder: string | undefined, originalName: string) {
+    const clean = folder ? folder.replace(/^\/+|\/+$/g, '') : '';
+    const ext = path.extname(originalName);
+    return clean ? `${clean}/${uuidv4()}${ext}` : `${uuidv4()}${ext}`;
+  }
+
   async upload(
     file: Express.Multer.File,
     options?: UploadOptions
   ): Promise<UploadedFileResult> {
-    const folder = options?.folder ? options.folder.replace(/^\/+|\/+$/g, '') : '';
-    const ext = path.extname(file.originalname);
-    const key = folder ? `${folder}/${uuidv4()}${ext}` : `${uuidv4()}${ext}`;
+    const key = this.newKey(options?.folder, file.originalname);
 
     await this.client.send(
       new PutObjectCommand({
@@ -69,6 +81,50 @@ class S3StorageProvider implements IStorageProvider {
       size: file.size,
       mimetype: file.mimetype,
       originalName: file.originalname,
+    };
+  }
+
+  async putFile(localPath: string, options: PutFileOptions): Promise<UploadedFileResult> {
+    const key = this.newKey(options.folder, options.originalName.toLowerCase());
+    const { size } = await fs.promises.stat(localPath);
+    await this.client.send(
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        Body: fs.createReadStream(localPath),
+        ContentLength: size,
+        ContentType: options.mimetype,
+      })
+    );
+    return {
+      key,
+      url: this.getUrl(key),
+      provider: this.name,
+      size,
+      mimetype: options.mimetype,
+      originalName: options.originalName,
+    };
+  }
+
+  async getFile(key: string, localPath: string): Promise<void> {
+    const { stream } = await this.openRead(key);
+    ensureDirectoryExists(path.dirname(localPath));
+    await pipeline(stream, fs.createWriteStream(localPath));
+  }
+
+  async openRead(key: string, range?: ByteRange): Promise<StoredObjectStream> {
+    const res = await this.client.send(
+      new GetObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        ...(range ? { Range: `bytes=${range.start}-${range.end ?? ''}` } : {}),
+      })
+    );
+    const total = res.ContentRange?.split('/')[1];
+    return {
+      stream: res.Body as Readable,
+      size: total && total !== '*' ? Number(total) : res.ContentLength,
+      contentType: res.ContentType,
     };
   }
 

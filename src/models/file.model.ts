@@ -10,6 +10,10 @@ export interface IFileDocument extends Document {
   size: number;
   folder?: string;
   uploadedBy?: Types.ObjectId;
+  /** sha256 hex digest — used for duplicate detection and integrity checks */
+  checksum?: string;
+  /** Private studio media is only reachable through signed /api/media URLs */
+  isPrivate?: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -48,6 +52,14 @@ const fileSchema: Schema<IFileDocument> = new Schema(
     uploadedBy: {
       type: Schema.Types.ObjectId,
       ref: 'User',
+    },
+    checksum: {
+      type: String,
+      index: true,
+    },
+    isPrivate: {
+      type: Boolean,
+      default: false,
     },
   },
   {

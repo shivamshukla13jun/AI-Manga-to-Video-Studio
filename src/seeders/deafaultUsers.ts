@@ -1,11 +1,13 @@
 import { Role } from "microservices/auth-service/types";
 import User from "models/user.model";
 import { Types } from "mongoose";
+import config from "config/env";
+// Seed credentials come from SEED_* env vars — no hardcoded passwords.
 export const defaultAdmin = (superAdminId:Types.ObjectId)=>{
     return {
         name: 'Admin',
-        email: 'shivamshukla@winggs.com',
-        password: '12345678',
+        email: config.SEED_ADMIN_EMAIL as string,
+        password: config.SEED_ADMIN_PASSWORD as string,
         role: Role.ADMIN,
         createdBy: superAdminId,
         updatedBy: superAdminId,
@@ -14,8 +16,8 @@ export const defaultAdmin = (superAdminId:Types.ObjectId)=>{
 export const defaultSuperAdmin = ()=>{
     return {
         name: 'Super Admin',
-        email: 'superadmin@gmail.com',
-        password: '12345678',
+        email: config.SEED_SUPERADMIN_EMAIL as string,
+        password: config.SEED_SUPERADMIN_PASSWORD as string,
         role: Role.SUPERADMIN,
     }
 }
@@ -27,6 +29,10 @@ export const defaultSuperAdmin = ()=>{
 const createDefaultUsers = async (): Promise<string> => {
    return new Promise<string>(async (resolve, reject) => {
      try {
+        if (!config.SEED_SUPERADMIN_EMAIL || !config.SEED_SUPERADMIN_PASSWORD) {
+            console.warn("SEED_SUPERADMIN_EMAIL / SEED_SUPERADMIN_PASSWORD not set — skipping user seeding");
+            return resolve("");
+        }
         // Handle super admin
         const defaultSuperAdminData = defaultSuperAdmin();
         let superAdmin = await User.findOne({ role: Role.SUPERADMIN });
@@ -44,6 +50,9 @@ const createDefaultUsers = async (): Promise<string> => {
             throw new Error("Failed to create/update super admin");
         }
 
+        if (!config.SEED_ADMIN_EMAIL || !config.SEED_ADMIN_PASSWORD) {
+            return resolve(superAdmin._id.toString());
+        }
         // Handle admin user
         let admin = await User.findOne({ 
             role: Role.ADMIN, 

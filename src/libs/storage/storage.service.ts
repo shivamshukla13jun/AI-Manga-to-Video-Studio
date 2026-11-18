@@ -1,7 +1,9 @@
 import config from 'config/env';
 import { AppError } from 'middlewares/error';
 import type {
+  ByteRange,
   IStorageProvider,
+  PutFileOptions,
   StorageProviderName,
   StoredFileRef,
   UploadedFileResult,
@@ -80,6 +82,25 @@ class StorageService {
         ? { key: ref, provider: config.STORAGE_PROVIDER }
         : ref;
     return this.getProvider(fileRef.provider).delete(fileRef.key);
+  }
+
+  /** Upload a local file to the active provider (streams, no memory buffering) */
+  putFile(localPath: string, options: PutFileOptions): Promise<UploadedFileResult> {
+    return this.getProvider().putFile(localPath, options);
+  }
+
+  getFile(ref: StoredFileRef, localPath: string): Promise<void> {
+    return this.getProvider(ref.provider).getFile(ref.key, localPath);
+  }
+
+  openRead(ref: StoredFileRef, range?: ByteRange) {
+    return this.getProvider(ref.provider).openRead(ref.key, range);
+  }
+
+  /** Local filesystem path when the provider is disk-backed, else undefined */
+  localPath(ref: StoredFileRef): string | undefined {
+    const provider = this.getProvider(ref.provider);
+    return provider.localPath ? provider.localPath(ref.key) : undefined;
   }
 
   getUrl(key: string, provider?: StorageProviderName): string {

@@ -1,5 +1,14 @@
 export const QUEUE_NAMES = {
-    NOTIFICATION: 'notification'
+    NOTIFICATION: 'notification',
+    // AI Manga-to-Video Studio
+    CBZ_EXTRACTION: 'studio-cbz-extraction',
+    PDF_CONVERSION: 'studio-pdf-conversion',
+    IMAGE_PROCESSING: 'studio-image-processing',
+    SCENE_DETECTION: 'studio-scene-detection',
+    STORY_GENERATION: 'studio-story-generation',
+    TTS_GENERATION: 'studio-tts-generation',
+    VIDEO_RENDERING: 'studio-video-rendering',
+    CLEANUP: 'studio-cleanup',
 };
 
 export const JOB_NAMES = {

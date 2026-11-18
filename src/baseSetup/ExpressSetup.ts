@@ -95,6 +95,12 @@ export const applyBaseSetup = (app: Express): void => {
     app.use('/secure-demo', express.static(demoRoot));
   }
 
+  // Studio media is private — only reachable through signed /api/media URLs
+  const privatePrefix = `/${config.STUDIO_STORAGE_FOLDER}`;
+  app.use(['/uploads' + privatePrefix, '/public' + privatePrefix], (_req, res) => {
+    res.status(404).end();
+  });
+
   // Serve static files with proper headers
   app.use('/uploads', express.static(UPLOAD_BASE_DIR as string, {
     maxAge: '1d',

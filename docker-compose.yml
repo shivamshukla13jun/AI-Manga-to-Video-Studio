@@ -8,6 +8,11 @@ services:
     restart: unless-stopped
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis123", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   rabbitmq:
     image: rabbitmq:3-management
@@ -21,6 +26,11 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: admin
       RABBITMQ_DEFAULT_PASS: admin123
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
   suwayomi:
     image: ghcr.io/suwayomi/suwayomi-server:preview
     # user: 1000:1000
@@ -59,6 +69,19 @@ services:
     environment:
       - TZ=Etc/UTC # Use TZ database name from https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
     restart: unless-stopped
+
+  # Optional local TTS inference service. Enable with:
+  #   docker compose --profile local-ai up -d local-tts
+  # Then point LOCAL_TTS_URL=http://127.0.0.1:8001 at it (already the default).
+  local-tts:
+    build: ./ai-service
+    container_name: manga-studio-local-tts
+    profiles: ["local-ai"]
+    ports:
+      - "8001:8001"
+    restart: unless-stopped
+    volumes:
+      - ./ai-service/voices:/app/voices   # drop Piper .onnx voice models here
 
 volumes:
   redis_data:

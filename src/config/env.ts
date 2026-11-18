@@ -139,6 +139,80 @@ const config = {
 
   // Run seeders automatically on server boot
   SEED_ON_BOOT: env("SEED_ON_BOOT") === "true",
+  SEED_SUPERADMIN_EMAIL: env("SEED_SUPERADMIN_EMAIL"),
+  SEED_SUPERADMIN_PASSWORD: env("SEED_SUPERADMIN_PASSWORD"),
+  SEED_ADMIN_EMAIL: env("SEED_ADMIN_EMAIL"),
+  SEED_ADMIN_PASSWORD: env("SEED_ADMIN_PASSWORD"),
+
+  // Firebase service-account JSON (kept out of git)
+  FIREBASE_SERVICE_ACCOUNT_PATH: env("FIREBASE_SERVICE_ACCOUNT_PATH"),
+
+  // ---------------------------------------------------------------------------
+  // AI Manga-to-Video Studio
+  // ---------------------------------------------------------------------------
+  // Scratch space for chunked uploads, extraction and rendering
+  STUDIO_TEMP_DIR: env("STUDIO_TEMP_DIR", "tmp/studio"),
+  // Storage folder prefix for all studio media (never served publicly)
+  STUDIO_STORAGE_FOLDER: env("STUDIO_STORAGE_FOLDER", "studio"),
+  // HMAC secret for short-lived signed media URLs (<img>/<audio> can't send bearer tokens)
+  MEDIA_URL_SECRET: env("MEDIA_URL_SECRET") || env("JWT_SECRET"),
+  MEDIA_URL_TTL_SECONDS: Number(env("MEDIA_URL_TTL_SECONDS", "21600")),
+
+  // Uploads / archive safety
+  CBZ_MAX_FILE_SIZE: Number(env("CBZ_MAX_FILE_SIZE", String(2 * 1024 ** 3))),
+  UPLOAD_CHUNK_SIZE: Number(env("UPLOAD_CHUNK_SIZE", String(8 * 1024 ** 2))),
+  UPLOAD_SESSION_TTL_HOURS: Number(env("UPLOAD_SESSION_TTL_HOURS", "48")),
+  CBZ_MAX_ENTRIES: Number(env("CBZ_MAX_ENTRIES", "5000")),
+  CBZ_MAX_UNCOMPRESSED_SIZE: Number(env("CBZ_MAX_UNCOMPRESSED_SIZE", String(6 * 1024 ** 3))),
+  CBZ_MAX_ENTRY_SIZE: Number(env("CBZ_MAX_ENTRY_SIZE", String(200 * 1024 ** 2))),
+  CBZ_MAX_COMPRESSION_RATIO: Number(env("CBZ_MAX_COMPRESSION_RATIO", "200")),
+  IMAGE_MAX_PIXELS: Number(env("IMAGE_MAX_PIXELS", "250000000")),
+  VOICE_SAMPLE_MAX_SIZE: Number(env("VOICE_SAMPLE_MAX_SIZE", String(25 * 1024 ** 2))),
+
+  // Background workers — run inside the API process (dev) or via `npm run worker`
+  WORKERS_IN_PROCESS: env("WORKERS_IN_PROCESS", "true") === "true",
+  JOB_CONCURRENCY_EXTRACTION: Number(env("JOB_CONCURRENCY_EXTRACTION", "2")),
+  JOB_CONCURRENCY_PDF: Number(env("JOB_CONCURRENCY_PDF", "1")),
+  JOB_CONCURRENCY_IMAGE: Number(env("JOB_CONCURRENCY_IMAGE", "2")),
+  JOB_CONCURRENCY_AI: Number(env("JOB_CONCURRENCY_AI", "2")),
+  JOB_CONCURRENCY_TTS: Number(env("JOB_CONCURRENCY_TTS", "1")),
+  JOB_CONCURRENCY_RENDER: Number(env("JOB_CONCURRENCY_RENDER", "1")),
+
+  // Gemini (server-side only — never sent to the frontend)
+  GEMINI_API_KEY: env("GEMINI_API_KEY"),
+  GEMINI_API_BASE: env("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta"),
+  GEMINI_API_REVISION: env("GEMINI_API_REVISION", "2026-05-20"),
+  GEMINI_VISION_MODEL: env("GEMINI_VISION_MODEL", "gemini-3.8-flash"),
+  GEMINI_STORY_MODEL: env("GEMINI_STORY_MODEL", "gemini-3.8-flash"),
+  GEMINI_THINKING_LEVEL: env("GEMINI_THINKING_LEVEL", "high"),
+  GEMINI_TTS_MODEL: env("GEMINI_TTS_MODEL", "gemini-3.8-flash-tts"),
+  GEMINI_TTS_LITE_MODEL: env("GEMINI_TTS_LITE_MODEL", "gemini-3.8-flash-lite-tts"),
+  GEMINI_TIMEOUT_MS: Number(env("GEMINI_TIMEOUT_MS", "180000")),
+  GEMINI_FILES_API: env("GEMINI_FILES_API", "true"),
+  GEMINI_MAX_IMAGES_PER_CALL: Number(env("GEMINI_MAX_IMAGES_PER_CALL", "24")),
+  AI_TILE_HEIGHT: Number(env("AI_TILE_HEIGHT", "2400")),
+  AI_TILE_OVERLAP: Number(env("AI_TILE_OVERLAP", "300")),
+
+  // Optional local TTS inference service (ai-service/)
+  LOCAL_TTS_URL: env("LOCAL_TTS_URL", "http://127.0.0.1:8001"),
+
+  // Media tooling
+  FFMPEG_PATH: env("FFMPEG_PATH", "ffmpeg"),
+  FFPROBE_PATH: env("FFPROBE_PATH", "ffprobe"),
+  RENDERER_DIR: env("RENDERER_DIR", "video-renderer"),
+  RENDER_SEGMENT_SECONDS: Number(env("RENDER_SEGMENT_SECONDS", "30")),
+  // URL headless Chrome uses to fetch media while rendering
+  RENDER_MEDIA_BASE_URL: env("RENDER_MEDIA_BASE_URL") || env("BASE_URL"),
+  // Headless Chrome for Remotion (falls back to Remotion's managed browser)
+  RENDER_BROWSER_EXECUTABLE: env("RENDER_BROWSER_EXECUTABLE"),
+  // Rendered segment checkpoints persist here so failed renders can resume
+  RENDER_CHECKPOINT_DIR: env("RENDER_CHECKPOINT_DIR", "tmp/render-checkpoints"),
+  FX_API_BASE: env("FX_API_BASE", "https://open.er-api.com/v6/latest/USD"),
+
+  // Public manga metadata (Jikan / MyAnimeList) used to seed characters on create
+  MANGA_METADATA_ENABLED: env("MANGA_METADATA_ENABLED", "true") === "true",
+  JIKAN_API_BASE: env("JIKAN_API_BASE", "https://api.jikan.moe/v4"),
+  METADATA_TIMEOUT_MS: Number(env("METADATA_TIMEOUT_MS", "8000")),
 };
 
 // Only truly required values are validated here. Provider-specific

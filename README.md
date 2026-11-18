@@ -192,3 +192,48 @@ Interactive docs: **http://localhost:3000/api-docs** (auto-generated; `SWAGGER_E
 | `npm run seed:prod` | Run seeders with `NODE_ENV=production` |
 
 Set `SEED_ON_BOOT=true` to also run seeders automatically on server startup (enabled in `.env.development`).
+
+---
+
+# AI Manga-to-Video Studio
+
+A complete pipeline built on top of the starter above: **CBZ upload → chapter organization → image extraction → scene detection → story generation → story editing → voice selection → cost estimation → audio generation → timeline editing → video rendering → MP4 export.**
+
+## Workflow modules
+
+| Module | Where | What it does |
+|---|---|---|
+| Manga Library | `/library` | Projects, multi-CBZ resumable uploads, chapter assignment/renumber/groups, page viewer |
+| CBZ → PDF | `/pdf` | Independent converter: chapter selection/range, reorder, merge to bookmarked PDF; JPEG pages embedded byte-for-byte |
+| AI Story Studio | `/story` | Scene detection on tall strips (CV gutters + Gemini vision), bounding-box editor, Hindi/other-language recap narration, character registry, edit locks & history |
+| Voice Studio | `/voice` | Gemini TTS + optional local TTS (`ai-service/`), voice profiles, consent-verified replication, per-segment audio with waveforms |
+| Cost estimation | settings | Every cloud spend is estimated and approved first (USD/INR); actual usage is metered and linked back to the estimate |
+| Video Studio | `/video` | Multi-track timeline (background/scenes/narration/music/sfx/subtitles/overlay), drag/trim/split/merge, keyframe animation, transitions, undo/autosave/versions, Remotion Player preview |
+| Render Manager | `/renders` | All background jobs: extraction, PDF, scene detection, story, TTS, rendering — progress, logs, cancel, retry |
+| Settings | `/settings` | Budget limits, confirmation thresholds, currency, pricing tier, default TTS provider/voice |
+
+## Running
+
+```bash
+cp .env.example .env.development   # fill GEMINI_API_KEY etc.
+npm install && cd frontend && npm install && cd ..
+npm run dev                        # API :3000 (workers run in-process)
+cd frontend && npm run dev         # UI  :5173
+```
+
+Requires Node.js, MongoDB, Redis, RabbitMQ and ffmpeg on the host (see `docker-compose.yml` for Redis/RabbitMQ; no Node/Mongo containers by design). Optional local TTS: `docker compose --profile local-ai up -d local-tts` or `pip install -r ai-service/requirements.txt && uvicorn app:app --port 8001`.
+
+Rendering uses Remotion (`video-renderer/` project) + FFmpeg. Headless Chrome is downloaded automatically on first render unless `RENDER_BROWSER_EXECUTABLE` is set. Segment checkpoints land in `RENDER_CHECKPOINT_DIR` so retries resume mid-render.
+
+## Tests
+
+```bash
+npm run test:fixtures                       # generate CBZ fixtures
+node tests/mocks/gemini.js                  # mock Gemini on :3999 (tests only)
+# start API with GEMINI_API_KEY=mock-key GEMINI_API_BASE=http://127.0.0.1:3999
+node --test tests/e2e/library.e2e.test.js   # upload/extract/media security
+node --test tests/e2e/pdf.e2e.test.js       # pdf conversion + byte-exact JPEG
+node --test tests/e2e/story.e2e.test.js     # AI pipeline (8 tests)
+node --test tests/e2e/video.e2e.test.js     # timeline + real render (8 tests)
+MSYS_NO_PATHCONV=1 node tests/ui/screenshots.js /video   # UI smoke + console errors
+```

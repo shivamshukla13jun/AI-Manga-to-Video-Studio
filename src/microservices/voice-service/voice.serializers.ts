@@ -1,0 +1,51 @@
+import { mediaUrl } from 'libs/studio/media';
+import type { IGeneratedAudioDocument } from 'models/generated-audio.model';
+import type { IVoiceProfileDocument } from 'models/voice-profile.model';
+
+export const serializeVoiceProfile = (v: IVoiceProfileDocument) => ({
+  id: String(v._id),
+  name: v.name,
+  provider: v.provider,
+  kind: v.kind,
+  voiceId: v.voiceId,
+  engine: v.engine,
+  language: v.language,
+  languages: v.languages,
+  gender: v.gender,
+  description: v.description,
+  styleHint: v.styleHint,
+  referenceUrl: mediaUrl(v.referenceAudio),
+  consentConfirmed: v.consentConfirmed,
+  status: v.status,
+  statusError: v.statusError,
+  createdAt: v.createdAt,
+});
+
+export const serializeAudio = (a: IGeneratedAudioDocument) => ({
+  id: String(a._id),
+  project: String(a.project),
+  chapter: a.chapter ? String(a.chapter) : undefined,
+  chapterNumber: a.chapterNumber,
+  segment: a.segment ? String(a.segment) : undefined,
+  purpose: a.purpose,
+  text: a.text,
+  characters: a.characters,
+  words: a.words,
+  language: a.language,
+  provider: a.provider,
+  modelId: a.modelId,
+  voiceId: a.voiceId,
+  voiceProfile: a.voiceProfile ? String(a.voiceProfile) : undefined,
+  speed: a.speed,
+  url: mediaUrl(a.file),
+  status: a.status,
+  error: a.error,
+  duration: a.duration,
+  waveform: a.waveform,
+  inputTokens: a.inputTokens,
+  outputTokens: a.outputTokens,
+  costUSD: a.costUSD,
+  version: a.version,
+  history: a.history.map((h) => ({ at: h.at, voiceId: h.voiceId, url: mediaUrl(h.file), duration: h.duration })),
+  updatedAt: a.updatedAt,
+});
