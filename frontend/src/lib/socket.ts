@@ -81,15 +81,16 @@ export const useRealtimeBridge = () => {
         },
       });
     }
+    // broadcasts don't carry logs — keep entries accumulated via job:log
     qc.setQueryData<Job[]>(['jobs'], (prev) => {
       if (!prev) return prev;
       const idx = prev.findIndex((j) => j.id === job.id);
       if (idx === -1) return [job, ...prev];
       const next = prev.slice();
-      next[idx] = job;
+      next[idx] = { ...job, logs: prev[idx].logs };
       return next;
     });
-    qc.setQueryData(['job', job.id], (prev: Job | undefined) => (prev ? { ...prev, ...job } : prev));
+    qc.setQueryData(['job', job.id], (prev: Job | undefined) => (prev ? { ...prev, ...job, logs: prev.logs } : prev));
     if (['completed', 'failed', 'cancelled'].includes(job.status)) {
       qc.invalidateQueries({ queryKey: ['jobs'] });
       if (job.project) {
@@ -98,6 +99,21 @@ export const useRealtimeBridge = () => {
         qc.invalidateQueries({ queryKey: ['pdf-exports'] });
       }
     }
+  });
+  useSocketEvent<{ job: string; at: string; level: 'info' | 'warn' | 'error'; message: string }>('job:log', (entry) => {
+    const append = (prev: Job[] | undefined) => {
+      if (!prev) return prev;
+      const idx = prev.findIndex((j) => j.id === entry.job);
+      if (idx === -1) return prev;
+      const next = prev.slice();
+      const logs = [...(next[idx].logs || []), { at: entry.at, level: entry.level, message: entry.message }];
+      next[idx] = { ...next[idx], logs: logs.slice(-200) };
+      return next;
+    };
+    qc.setQueryData<Job[]>(['jobs'], append);
+    qc.setQueryData(['job', entry.job], (prev: Job | undefined) =>
+      prev ? { ...prev, logs: [...(prev.logs || []), { at: entry.at, level: entry.level, message: entry.message }].slice(-200) } : prev
+    );
   });
   useSocketEvent<{ id: string; project: string }>('chapter:update', (c) => {
     qc.invalidateQueries({ queryKey: ['chapters', c.project] });

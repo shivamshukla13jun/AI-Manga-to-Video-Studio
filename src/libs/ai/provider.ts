@@ -27,6 +27,8 @@ export interface JsonRequest {
   kind: 'vision' | 'text';
   maxOutputTokens?: number;
   signal?: AbortSignal;
+  /** Retries/fallbacks/provider errors are reported here so jobs can surface them */
+  onLog?: (message: string, level?: 'info' | 'warn' | 'error') => void | Promise<void>;
 }
 
 export interface JsonResult<T> {
@@ -81,6 +83,7 @@ class GeminiVisionProvider implements VisionLanguageProvider {
         thinkingLevel: config.GEMINI_THINKING_LEVEL as any,
         maxOutputTokens: req.maxOutputTokens,
         signal: req.signal,
+        onLog: req.onLog,
       });
     const canUseFiles = !this.fileUrisBroken && (req.images || []).length > 0 && req.images!.every((i) => !!i.uri);
     let r;
@@ -89,6 +92,7 @@ class GeminiVisionProvider implements VisionLanguageProvider {
     } catch (e) {
       if (!canUseFiles) throw e;
       this.fileUrisBroken = true;
+      await req.onLog?.(`Gemini rejected file-URI input (${(e as Error).message}) — retrying with inline images`, 'warn');
       r = await call(false);
     }
     return { data: r.json as T, usage: r.usage, model: r.model, provider: this.name };

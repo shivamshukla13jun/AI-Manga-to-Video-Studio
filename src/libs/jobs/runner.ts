@@ -2,7 +2,7 @@ import { Job, UnrecoverableError, Worker } from 'bullmq';
 import config from 'config/env';
 import { bullMQService } from 'libs/bullmq/bullmq.service';
 import ProcessingJob, { IProcessingJobDocument, JobType } from 'models/processing-job.model';
-import { CANCEL_CHANNEL, subscribe } from 'libs/realtime/events';
+import { CANCEL_CHANNEL, emitToUser, subscribe } from 'libs/realtime/events';
 import { JOB_QUEUE, broadcastJob } from './job.service';
 
 /** Thrown when the user cancels a running job — never retried. */
@@ -89,6 +89,7 @@ const runTracked = async (bullJob: Job<{ jobId: string }>) => {
       const entry = { at: new Date(), level, message };
       job.logs.push(entry);
       await ProcessingJob.updateOne({ _id: job._id }, { $push: { logs: { $each: [entry], $slice: -500 } } });
+      await emitToUser(job.owner, 'job:log', { job: String(job._id), ...entry }, job.project).catch(() => undefined);
     },
     throwIfCancelled() {
       if (controller.signal.aborted) throw new JobCancelledError();

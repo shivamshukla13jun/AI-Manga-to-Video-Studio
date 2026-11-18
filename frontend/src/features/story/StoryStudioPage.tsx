@@ -1,9 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { BookOpen, Clapperboard, FileText, ScanSearch, Sparkles, TriangleAlert } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { NativeSelect } from '@/components/ui/input';
-import { Badge, Checkbox, Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/primitives';
+import { Badge, Checkbox, Progress, Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/primitives';
 import { EmptyState, JobErrorBanner, JobStatusBadge, LoadingState, PageHeader } from '@/components/common/states';
 import { mangaApi, storyApi, useAction, useJobs, useProjects, useStoryOverview, useStudioSettings, useVideos, videoApi } from '@/lib/queries';
 import { useProjectRoom } from '@/lib/socket';
@@ -13,6 +13,47 @@ import { EstimateDialog } from './EstimateDialog';
 import { SceneEditor } from './SceneEditor';
 import { NarrationEditor } from './NarrationEditor';
 import { CharactersPanel } from './CharactersPanel';
+
+/** 1s ticker so elapsed time updates while a job runs. */
+const useNow = (active: boolean) => {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    const t = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [active]);
+  return Date.now();
+};
+
+const LOG_TONE: Record<string, string> = { info: 'text-muted', warn: 'text-warn', error: 'text-danger' };
+
+/** Live job console: current stage, progress bar, elapsed time, streaming log lines. */
+const LiveJob = ({ job }: { job: Job }) => {
+  const now = useNow(true);
+  const elapsed = job.startedAt ? (now - new Date(job.startedAt).getTime()) / 1000 : undefined;
+  const logs = (job.logs || []).slice(-5);
+  return (
+    <div className="rounded border border-line bg-panel px-3 py-2 text-xs">
+      <div className="flex items-center gap-2">
+        <JobStatusBadge status={job.status} />
+        <span className="font-medium">{job.title}</span>
+        <span className="ml-auto font-mono text-muted">{elapsed !== undefined ? formatDuration(elapsed) : 'queued'}</span>
+        <span className="font-mono text-muted">{Math.round(job.progress)}%</span>
+      </div>
+      <Progress value={job.progress} tone={job.status === 'retrying' ? 'warn' : 'accent'} className="mt-1.5" />
+      {job.stage && <div className="mt-1.5 truncate text-fg">{job.stage}</div>}
+      {logs.length > 0 && (
+        <div className="mt-1 space-y-px font-mono text-[10px] leading-relaxed">
+          {logs.map((l, i) => (
+            <div key={i} className={LOG_TONE[l.level] || 'text-muted'}>
+              {l.message}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const LANGUAGES = [
   ['hi', 'Hindi'], ['en', 'English'], ['ja', 'Japanese'], ['ko', 'Korean'], ['ta', 'Tamil'], ['te', 'Telugu'], ['bn', 'Bengali'], ['es', 'Spanish'], ['fr', 'French'], ['de', 'German'],
@@ -215,11 +256,9 @@ const Studio = ({ projectId }: { projectId: string }) => {
         </div>
       )}
       {running.length > 0 && (
-        <div className="flex items-center gap-3 border-b border-line bg-panel-2 px-4 py-1.5 text-xs">
+        <div className="space-y-2 border-b border-line bg-panel-2 px-4 py-2">
           {running.map((j) => (
-            <span key={j.id} className="flex items-center gap-2">
-              <JobStatusBadge status={j.status} /> {j.title} <span className="font-mono text-muted">{Math.round(j.progress)}%</span>
-            </span>
+            <LiveJob key={j.id} job={j} />
           ))}
         </div>
       )}

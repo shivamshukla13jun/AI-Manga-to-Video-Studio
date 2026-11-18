@@ -29,7 +29,7 @@ export interface TtsProvider {
   /** remote probe of an optional service — cached briefly so page loads stay fast */
   status(): Promise<{ ok: boolean; detail?: string }>;
   listVoices(): Promise<TtsVoice[]>;
-  speak(req: { text: string; voiceId: string; language: string; speed?: number; signal?: AbortSignal }): Promise<SpeakResult>;
+  speak(req: { text: string; voiceId: string; language: string; speed?: number; signal?: AbortSignal; onLog?: (message: string, level?: 'info' | 'warn' | 'error') => void | Promise<void> }): Promise<SpeakResult>;
   /** Create a replicated/custom voice from reference + consent audio. Throws a clear error when unsupported. */
   replicateVoice?(req: { name: string; referenceWav: Buffer; consentWav: Buffer; language: string; signal?: AbortSignal }): Promise<{ voiceId: string }>;
 }
@@ -91,7 +91,7 @@ class GeminiTts implements TtsProvider {
       description: v.description,
     }));
   }
-  async speak(req: { text: string; voiceId: string; language: string; speed?: number; signal?: AbortSignal }): Promise<SpeakResult> {
+  async speak(req: { text: string; voiceId: string; language: string; speed?: number; signal?: AbortSignal; onLog?: (message: string, level?: 'info' | 'warn' | 'error') => void | Promise<void> }): Promise<SpeakResult> {
     // Interactions API: request an audio response with a prebuilt voice.
     // NOTE: verify the exact speech_config field names against the live API
     // when a key is available — the mock server tolerates the whole payload.
@@ -107,6 +107,7 @@ class GeminiTts implements TtsProvider {
         },
       },
       signal: req.signal,
+      onLog: req.onLog,
     });
     if (!r.audio?.data) throw new Error('Gemini TTS returned no audio');
     return { audio: Buffer.from(r.audio.data, 'base64'), mimeType: r.audio.mimeType || 'audio/wav', usage: ttsUsage(r.usage), model: r.model, provider: 'gemini' };

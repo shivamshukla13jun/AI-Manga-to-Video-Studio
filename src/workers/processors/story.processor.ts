@@ -48,8 +48,10 @@ const validCoverage = (segments: any[], sceneCount: number) => {
   return flat.length === sceneCount && flat.every((n: number, i: number) => n === i + 1) && segments.every((s) => s.sceneNumbers?.length && s.narration?.trim());
 };
 
+type Report = (frac: number, stage: string) => Promise<void>;
+
 /** Crop every scene's regions; for Gemini, upload them to the Files API once — one vision call per chapter. */
-const sceneImages = async (ctx: JobContext, scenes: IDetectedSceneDocument[], tempDir: string, useFilesApi = true) => {
+const sceneImages = async (ctx: JobContext, scenes: IDetectedSceneDocument[], tempDir: string, useFilesApi: boolean, report: Report) => {
   const docs = new Map((await ComicImage.find({ _id: { $in: scenes.flatMap((s) => s.regions.map((r) => r.image)) } })).map((i) => [String(i._id), i]));
   const images: VisionImage[] = [];
   for (let i = 0; i < scenes.length; i++) {
@@ -64,15 +66,20 @@ const sceneImages = async (ctx: JobContext, scenes: IDetectedSceneDocument[], te
         label: parts.length > 1 ? `SCENE ${i + 1} · PART ${k + 1}` : `SCENE ${i + 1}`,
       });
     }
+    await report((i + 1) / scenes.length * 0.3, `Cropping scene ${i + 1}/${scenes.length}`);
   }
+  await ctx.log(`${images.length} scene image(s) cropped from ${scenes.length} scenes`);
   if (!useFilesApi) return images;
+  const total = images.length;
+  let done = 0;
   const queue = images.map((img, i) => ({ img, label: img.label || `scene-${i}` }));
   await Promise.all(
     Array.from({ length: Math.min(6, queue.length) }, async () => {
       while (queue.length) {
         const item = queue.shift()!;
-        const f = await uploadFile(item.img.data, 'image/jpeg', item.label, ctx.signal);
+        const f = await uploadFile(item.img.data, 'image/jpeg', item.label, ctx.signal, (m, l) => ctx.log(m, l));
         if (f) item.img.uri = f.uri;
+        await report(0.3 + (++done / total) * 0.3, `Uploading scene image ${done}/${total} to Files API`);
       }
     })
   );
@@ -86,10 +93,12 @@ const generateChapter = async (
   chapter: IMangaChapterDocument,
   scenes: IDetectedSceneDocument[],
   opts: { language: string; mode: 'original' | 'recap'; continuity?: string; previousSummary?: string; projectId: Types.ObjectId; title: string; provider: 'local' | 'gemini' },
-  tempDir: string
+  tempDir: string,
+  report: Report
 ) => {
   const provider = getVisionProvider(opts.provider);
-  const images = await sceneImages(ctx, scenes, tempDir, opts.provider === 'gemini');
+  const images = await sceneImages(ctx, scenes, tempDir, opts.provider === 'gemini', report);
+  await report(0.62, 'Building prompt and character registry');
   const base = [
     `Manga: ${opts.title}. Chapter ${chapter.number}${chapter.title ? ` — ${chapter.title}` : ''}.`,
     `This chapter has ${scenes.length} scenes, shown as images labelled SCENE 1..${scenes.length}.`,
@@ -102,8 +111,15 @@ const generateChapter = async (
 
   let prompt = base;
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const r = await provider.generateJson<any>({ system: visualStorySystem(opts.language, opts.mode), prompt, images, schema: storySchema, kind: 'vision', signal: ctx.signal });
+    const label = `Chapter ${chapter.number}: waiting for ${provider.name}`;
+    await report(0.65 + (attempt - 1) * 0.08, attempt > 1 ? `${label} (retry)` : label);
+    await ctx.log(`Requesting narration for chapter ${chapter.number} — ${images.length} scene image(s), ${scenes.length} scenes · ${provider.name}${attempt > 1 ? ' (coverage retry)' : ''}`);
+    const started = Date.now();
+    const r = await provider.generateJson<any>({ system: visualStorySystem(opts.language, opts.mode), prompt, images, schema: storySchema, kind: 'vision', signal: ctx.signal, onLog: (m, l) => ctx.log(m, l) });
+    const secs = ((Date.now() - started) / 1000).toFixed(1);
     await recordUsage({ owner: ctx.job.owner, project: opts.projectId, job: ctx.job._id as any, provider: r.provider, model: r.model, kind: 'vision', usage: r.usage });
+    const tokens = (r.usage?.inputTokens || 0) + (r.usage?.outputTokens || 0) + (r.usage?.thoughtTokens || 0);
+    await ctx.log(`Chapter ${chapter.number}: ${provider.name}/${r.model} responded in ${secs}s — ${tokens.toLocaleString()} tokens, ${r.data?.segments?.length || 0} segment(s)`);
     if (validCoverage(r.data?.segments || [], scenes.length)) return r.data;
     await ctx.log(`Chapter ${chapter.number}: narration did not cover scenes 1..${scenes.length} exactly once in order — asking the model to correct it`, 'warn');
     prompt = `${base}\n\nIMPORTANT: your previous answer skipped, repeated or reordered scene numbers. Every scene number 1..${scenes.length} must appear exactly once, in order, in contiguous groups, each with non-empty narration.`;
@@ -112,6 +128,7 @@ const generateChapter = async (
 };
 
 export const generateRange = async (ctx: JobContext<{ projectId: string; chapterIds: string[]; language: string; mode: 'original' | 'recap'; overwriteEdited?: boolean; provider?: string }>) => {
+  await ctx.progress(1, 'Loading project and settings');
   const project = await MangaProject.findById(ctx.payload.projectId);
   if (!project) throw new NonRetryableError('Project no longer exists');
   const settings = await getSettings(project.owner);
@@ -123,7 +140,9 @@ export const generateRange = async (ctx: JobContext<{ projectId: string; chapter
     (a, b) => ctx.payload.chapterIds.indexOf(String(a._id)) - ctx.payload.chapterIds.indexOf(String(b._id))
   );
   if (!chapters.length) throw new NonRetryableError('No chapters selected');
+  await ctx.log(`Writing ${mode} narration in ${language} for ${chapters.length} chapter(s): ${chapters.map((c) => c.number).join(', ')} · provider ${provider.name}`);
 
+  await ctx.progress(3, 'Checking scene coverage');
   const noScenes = [];
   for (const c of chapters) if (!(await DetectedScene.exists({ chapter: c._id }))) noScenes.push(c.number);
   if (noScenes.length) throw new NonRetryableError(`Detect scenes first for chapter(s) ${noScenes.join(', ')}`, 'NO_SCENES');
@@ -146,15 +165,20 @@ export const generateRange = async (ctx: JobContext<{ projectId: string; chapter
   for (let i = 0; i < chapters.length; i++) {
     ctx.throwIfCancelled();
     const chapter = chapters[i];
-    await ctx.progress((100 * i) / chapters.length + 1, `Writing chapter ${chapter.number} (${i + 1}/${chapters.length})`);
+    const bandStart = (100 * i) / chapters.length + 4;
+    const bandSize = 96 / chapters.length;
+    const report: Report = (frac, stage) => ctx.progress(bandStart + frac * bandSize, `Ch ${chapter.number} (${i + 1}/${chapters.length}): ${stage}`);
+    await report(0, `preparing (${i + 1}/${chapters.length})`);
     chapter.storyStatus = 'processing';
     await chapter.save();
     await emitToUser(chapter.owner, 'chapter:update', serializeChapter(chapter), chapter.project);
     try {
       const scenes = await DetectedScene.find({ chapter: chapter._id }).sort({ order: 1 });
-      const out = await generateChapter(ctx, chapter, scenes, { language, mode, continuity, previousSummary, projectId: project._id as Types.ObjectId, title: project.title, provider: aiProvider }, tempDir);
+      await ctx.log(`Chapter ${chapter.number}: loaded ${scenes.length} detected scene(s)`);
+      const out = await generateChapter(ctx, chapter, scenes, { language, mode, continuity, previousSummary, projectId: project._id as Types.ObjectId, title: project.title, provider: aiProvider }, tempDir, report);
       ctx.throwIfCancelled();
 
+      await report(0.9, `Saving ${out.segments.length} narration segment(s)`);
       await StorySegment.deleteMany({ chapter: chapter._id, language, mode });
       let order = 0;
       for (const seg of out.segments) {
@@ -179,6 +203,7 @@ export const generateRange = async (ctx: JobContext<{ projectId: string; chapter
         });
       }
       totalSegments += order;
+      await report(0.95, 'Updating characters and continuity');
       await upsertCharacters(chapter.owner, project._id as Types.ObjectId, chapter.number, out.characters);
       chapter.summary = out.chapterSummary;
       chapter.storyStatus = 'done';
@@ -192,6 +217,7 @@ export const generateRange = async (ctx: JobContext<{ projectId: string; chapter
       }
       await emitToUser(chapter.owner, 'chapter:update', serializeChapter(chapter), chapter.project);
       await emitToUser(chapter.owner, 'story:update', { chapter: String(chapter._id), language, mode }, chapter.project);
+      await ctx.log(`Chapter ${chapter.number} done — ${order} segment(s), ${out.characters?.length || 0} character update(s)`);
     } catch (error) {
       chapter.storyStatus = 'failed';
       await chapter.save();
@@ -224,6 +250,8 @@ const rewriteSegment = async (ctx: JobContext<{ segmentId: string; action: Rewri
   ]);
   const language = action === 'translate' ? ctx.payload.language || seg.language : seg.language;
   await ctx.progress(20, `${action} narration`);
+  await ctx.log(`Requesting ${action} for segment ${seg.order} (chapter ${seg.chapterNumber}) · ${provider.name}`);
+  const started = Date.now();
   const r = await provider.generateJson<any>({
     system: storySystem(language, seg.mode),
     prompt: [
@@ -241,8 +269,10 @@ const rewriteSegment = async (ctx: JobContext<{ segmentId: string; action: Rewri
     schema: rewriteSchema,
     kind: 'text',
     signal: ctx.signal,
+    onLog: (m, l) => ctx.log(m, l),
   });
   await recordUsage({ owner: ctx.job.owner, project: seg.project, job: ctx.job._id as any, provider: r.provider, model: r.model, kind: 'text', usage: r.usage });
+  await ctx.log(`${provider.name}/${r.model} responded in ${((Date.now() - started) / 1000).toFixed(1)}s`);
   const narration = String(r.data?.narration || '').trim();
   if (!narration) throw new Error('The model returned empty narration');
 

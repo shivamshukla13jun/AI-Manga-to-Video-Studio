@@ -25,8 +25,12 @@ const uploadBase = () => `${new URL(config.GEMINI_API_BASE as string).origin}/up
  * URI in interactions instead of re-sending base64 bytes in every request.
  * Returns null on any failure — callers must fall back to inline data.
  */
-export const uploadFile = async (buf: Buffer, mimeType: string, displayName: string, signal?: AbortSignal): Promise<UploadedFile | null> => {
+export const uploadFile = async (buf: Buffer, mimeType: string, displayName: string, signal?: AbortSignal, onLog?: InteractionRequest['onLog']): Promise<UploadedFile | null> => {
   if (!config.GEMINI_API_KEY || config.GEMINI_FILES_API === 'false') return null;
+  const fail = async (why: string) => {
+    await onLog?.(`Files API upload failed for "${displayName}": ${why} — sending image inline instead`, 'warn');
+    return null;
+  };
   try {
     const start = await fetch(`${uploadBase()}/files`, {
       method: 'POST',
@@ -42,7 +46,7 @@ export const uploadFile = async (buf: Buffer, mimeType: string, displayName: str
       signal: signal || AbortSignal.timeout(60000),
     });
     const uploadUrl = start.headers.get('x-goog-upload-url');
-    if (!start.ok || !uploadUrl) return null;
+    if (!start.ok || !uploadUrl) return fail(`start request returned HTTP ${start.status}`);
 
     const up = await fetch(uploadUrl, {
       method: 'POST',
@@ -57,7 +61,7 @@ export const uploadFile = async (buf: Buffer, mimeType: string, displayName: str
     });
     const json: any = await up.json().catch(() => ({}));
     const file = json?.file;
-    if (!up.ok || !file?.uri) return null;
+    if (!up.ok || !file?.uri) return fail(`upload returned HTTP ${up.status}${json?.error?.message ? `: ${json.error.message}` : ''}`);
 
     // Media may still be processing server-side — poll until ACTIVE.
     for (let i = 0; i < 8 && file.state === 'PROCESSING'; i++) {
@@ -68,11 +72,11 @@ export const uploadFile = async (buf: Buffer, mimeType: string, displayName: str
       });
       const sj: any = await st.json().catch(() => ({}));
       if (sj?.state === 'ACTIVE') break;
-      if (sj?.state === 'FAILED') return null;
+      if (sj?.state === 'FAILED') return fail('media processing failed server-side');
     }
     return { uri: file.uri, name: file.name };
-  } catch {
-    return null;
+  } catch (e: any) {
+    return fail(e?.message || 'network error');
   }
 };
 
@@ -96,6 +100,8 @@ export interface InteractionRequest {
   responseFormat?: Record<string, unknown>;
   generationConfig?: Record<string, unknown>;
   signal?: AbortSignal;
+  /** Retries/fallbacks/provider errors are reported here so jobs can surface them */
+  onLog?: (message: string, level?: 'info' | 'warn' | 'error') => void | Promise<void>;
 }
 
 export interface InteractionResult {
@@ -156,7 +162,7 @@ const sleep = (ms: number, signal?: AbortSignal) =>
     }, { once: true });
   });
 
-export const geminiFetch = async (path: string, init: { method?: string; body?: unknown; signal?: AbortSignal; query?: Record<string, string | string[]> }) => {
+export const geminiFetch = async (path: string, init: { method?: string; body?: unknown; signal?: AbortSignal; query?: Record<string, string | string[]>; onLog?: InteractionRequest['onLog'] }) => {
   assertKey();
   const url = new URL(`${config.GEMINI_API_BASE}${path}`);
   Object.entries(init.query || {}).forEach(([k, v]) => (Array.isArray(v) ? v : [v]).forEach((x) => url.searchParams.append(k, x)));
@@ -179,6 +185,7 @@ export const geminiFetch = async (path: string, init: { method?: string; body?: 
     } catch (error: any) {
       if (init.signal?.aborted) throw error;
       if (attempt >= maxAttempts) throw new GeminiError(`Gemini request failed: ${error.message}`, 0, true);
+      await init.onLog?.(`Gemini request failed (${error.message}) — retry ${attempt}/${maxAttempts - 1} in ${2 ** attempt}s`, 'warn');
       await sleep(1000 * 2 ** attempt, init.signal);
       continue;
     }
@@ -188,6 +195,7 @@ export const geminiFetch = async (path: string, init: { method?: string; body?: 
     const message = json?.error?.message || `Gemini API error ${res.status}`;
     const retryable = res.status === 429 || res.status >= 500;
     if (!retryable) {
+      await init.onLog?.(`Gemini API error ${res.status}: ${message}`, 'error');
       if (res.status === 401 || res.status === 403) {
         throw new NonRetryableError(`Gemini rejected the API key or the project lacks access: ${message}`, 'AI_AUTH');
       }
@@ -195,7 +203,9 @@ export const geminiFetch = async (path: string, init: { method?: string; body?: 
     }
     if (attempt >= maxAttempts) throw new GeminiError(message, res.status, true);
     const retryAfter = Number(res.headers.get('retry-after'));
-    await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1500 * 2 ** attempt, init.signal);
+    const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1500 * 2 ** attempt;
+    await init.onLog?.(`Gemini API ${res.status}: ${message} — retry ${attempt}/${maxAttempts - 1} in ${Math.round(waitMs / 1000)}s`, 'warn');
+    await sleep(waitMs, init.signal);
   }
 };
 
@@ -229,7 +239,7 @@ const runInteraction = async (model: string, req: InteractionRequest): Promise<I
   if (req.schema) body.response_format = { type: 'text', mime_type: 'application/json', schema: req.schema };
   else if (req.responseFormat) body.response_format = req.responseFormat;
 
-  const raw = await geminiFetch('/interactions', { body, signal: req.signal });
+  const raw = await geminiFetch('/interactions', { body, signal: req.signal, onLog: req.onLog });
   if (raw?.status && !['completed', 'incomplete'].includes(raw.status)) {
     throw new GeminiError(`Gemini interaction ended with status "${raw.status}"`, 200, raw.status !== 'failed');
   }
@@ -248,6 +258,9 @@ const runInteraction = async (model: string, req: InteractionRequest): Promise<I
 export const createInteraction = async (req: InteractionRequest): Promise<InteractionResult> => {
   const chain = Array.isArray(req.model) ? req.model : [req.model];
   const candidates = cooledModels(chain);
+  if (candidates.length < chain.length) {
+    await req.onLog?.(`Skipping rate-limited model(s): ${chain.filter((m) => !candidates.includes(m)).join(', ')} (cooling down)`, 'warn');
+  }
   if (!candidates.length) {
     throw new GeminiError(`All Gemini models in the fallback chain are rate-limited (${chain.join(', ')}). Wait a minute and retry.`, 429, true);
   }
@@ -258,7 +271,9 @@ export const createInteraction = async (req: InteractionRequest): Promise<Intera
     } catch (e) {
       if (!isQuotaError(e)) throw e;
       modelCooldowns.set(model, Date.now() + RATE_LIMIT_COOLDOWN_MS);
-      console.warn(`[gemini] model ${model} rate-limited — cooling down 60s${candidates.indexOf(model) < candidates.length - 1 ? ', trying next model' : ''}`);
+      const next = candidates[candidates.indexOf(model) + 1];
+      await req.onLog?.(`Gemini model ${model} rate-limited/quota: ${(e as Error).message}${next ? ` — trying ${next}` : ' — no fallback left'}`, 'warn');
+      console.warn(`[gemini] model ${model} rate-limited — cooling down 60s${next ? ', trying next model' : ''}`);
       lastErr = e;
     }
   }

@@ -9,6 +9,7 @@ import Character from 'models/character.model';
 import CostEstimate from 'models/cost-estimate.model';
 import { asyncHandler, assertObjectId, notFound, ok, ownerFilter } from 'libs/studio/http';
 import { broadcastJob, enqueueJob, serializeJob } from 'libs/jobs/job.service';
+import { emitToUser } from 'libs/realtime/events';
 import { approveEstimate, serializeEstimate } from 'libs/pricing/estimator';
 import { getSettings } from 'libs/pricing/pricing.service';
 import { deleteFileById, signMediaPath } from 'libs/studio/media';
@@ -225,10 +226,16 @@ export const generateStory = asyncHandler(async (req, res) => {
       signal: controller.signal,
       isRerun: false,
       progress: async (percent, stage) => {
-        await ProcessingJob.updateOne({ _id: job._id }, { $set: { progress: Math.max(0, Math.min(100, percent)), ...(stage ? { stage } : {}) } });
+        job.progress = Math.max(0, Math.min(100, percent));
+        if (stage) job.stage = stage;
+        await ProcessingJob.updateOne({ _id: job._id }, { $set: { progress: job.progress, stage: job.stage } });
+        await broadcastJob(job);
       },
       log: async (message, level = 'info') => {
-        await ProcessingJob.updateOne({ _id: job._id }, { $push: { logs: { $each: [{ at: new Date(), level, message }], $slice: -500 } } });
+        const entry = { at: new Date(), level, message };
+        job.logs.push(entry);
+        await ProcessingJob.updateOne({ _id: job._id }, { $push: { logs: { $each: [entry], $slice: -500 } } });
+        await emitToUser(job.owner, 'job:log', { job: String(job._id), ...entry }, job.project).catch(() => undefined);
       },
       throwIfCancelled: () => {},
     };

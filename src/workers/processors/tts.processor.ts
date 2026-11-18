@@ -28,7 +28,7 @@ const synthesize = async (ctx: JobContext, audioId: string) => {
 
   const tmp = await makeTempDir('tts');
   try {
-    const r = await provider.speak({ text: doc.text, voiceId: doc.voiceId, language: doc.language, speed: doc.speed, signal: ctx.signal });
+    const r = await provider.speak({ text: doc.text, voiceId: doc.voiceId, language: doc.language, speed: doc.speed, signal: ctx.signal, onLog: (m, l) => ctx.log(m, l) });
     const ext = r.mimeType.includes('mpeg') || r.mimeType.includes('mp3') ? '.mp3' : r.mimeType.includes('ogg') ? '.ogg' : '.wav';
     const rawPath = path.join(tmp, `narration${ext}`);
     await fs.promises.writeFile(rawPath, r.audio);
