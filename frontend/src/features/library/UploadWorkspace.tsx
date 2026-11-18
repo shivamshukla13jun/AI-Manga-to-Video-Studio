@@ -6,6 +6,7 @@ import { Input } from '@/components/ui/input';
 import { Badge, Progress, Tooltip } from '@/components/ui/primitives';
 import { useUploads, type UploadItem } from '@/stores/uploads';
 import { cn, formatBytes } from '@/lib/utils';
+import { mergeCbzFiles } from '@/lib/cbz-merge';
 import type { Chapter } from '@/lib/types';
 
 const STATUS_TONE: Record<UploadItem['status'], 'neutral' | 'accent' | 'ok' | 'danger' | 'warn'> = {
@@ -27,15 +28,40 @@ export const UploadWorkspace = ({ projectId, chapters }: { projectId: string; ch
   const { add, update, remove, start, startAll, pause, clearFinished } = useUploads();
   const [dragging, setDragging] = useState(false);
   const [startNumber, setStartNumber] = useState('1');
+  const [skipFirstPage, setSkipFirstPage] = useState(false);
+  const [mergeUnits, setMergeUnits] = useState(true);
+  const [merging, setMerging] = useState(false);
+  const [mergeError, setMergeError] = useState<string | null>(null);
   const input = useRef<HTMLInputElement>(null);
 
   const existingNumbers = new Set(chapters.map((c) => c.number));
   const queuedNumbers = items.filter((i) => i.status !== 'done' && !i.replaceChapterId).map((i) => i.chapterNumber);
   const dupInQueue = (n?: number) => n !== undefined && queuedNumbers.filter((x) => x === n).length > 1;
 
-  const onFiles = (files: FileList | File[]) => {
+  const onFiles = async (files: FileList | File[]) => {
     const list = Array.from(files).sort((a, b) => collator.compare(a.name, b.name));
-    add(projectId, list);
+    setMergeError(null);
+    if (!mergeUnits) {
+      add(projectId, list, { skipPages: skipFirstPage ? 1 : undefined });
+      return;
+    }
+    // Merge on the client: pages from all CBZs are repacked into ≤48MB units —
+    // only the merged units ever reach the server.
+    setMerging(true);
+    try {
+      const merged = await mergeCbzFiles(list, { skipFirstPage });
+      add(projectId, merged, { autoMerge: true });
+    } catch (error: any) {
+      setMergeError(error?.message || 'Could not merge the selected archives');
+    } finally {
+      setMerging(false);
+    }
+  };
+
+  const toggleSkipFirst = (on: boolean) => {
+    setSkipFirstPage(on);
+    // Merged units already dropped their first pages in the browser.
+    items.filter((i) => ['pending', 'paused', 'error'].includes(i.status) && !i.autoMerge).forEach((i) => update(i.id, { skipPages: on ? 1 : undefined }));
   };
 
   const pending = items.filter((i) => ['pending', 'paused', 'error'].includes(i.status));
@@ -76,6 +102,29 @@ export const UploadWorkspace = ({ projectId, chapters }: { projectId: string; ch
         <p className="text-sm font-medium">Drop CBZ chapters here or click to browse</p>
         <p className="text-xs text-muted">Multiple files · resumable chunked upload · large archives are streamed, never loaded into memory</p>
         <input ref={input} type="file" accept=".cbz,.zip" multiple hidden onChange={(e) => e.target.files && (onFiles(e.target.files), (e.target.value = ''))} />
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <label className="flex w-fit cursor-pointer items-center gap-2 text-xs text-muted select-none">
+          <input
+            type="checkbox"
+            checked={mergeUnits}
+            onChange={(e) => setMergeUnits(e.target.checked)}
+            className="size-3.5 accent-accent"
+          />
+          Merge into ≤50MB PDF units <span className="text-dim">(merges in your browser — only merged units are uploaded &amp; stored)</span>
+        </label>
+        <label className="flex w-fit cursor-pointer items-center gap-2 text-xs text-muted select-none">
+          <input
+            type="checkbox"
+            checked={skipFirstPage}
+            onChange={(e) => toggleSkipFirst(e.target.checked)}
+            className="size-3.5 accent-accent"
+          />
+          Skip first page of every chapter <span className="text-dim">(drops cover/credit pages during extraction)</span>
+        </label>
+        {merging && <span className="text-[11px] text-accent-2">Merging archives in the browser…</span>}
+        {mergeError && <span className="text-[11px] text-danger">{mergeError}</span>}
       </div>
 
       {items.length > 0 && (
@@ -120,6 +169,8 @@ export const UploadWorkspace = ({ projectId, chapters }: { projectId: string; ch
                       <span className="shrink-0 font-mono text-[10px] text-dim">{formatBytes(i.file.size)}</span>
                       <Badge tone={STATUS_TONE[i.status]}>{i.status}</Badge>
                       {i.replaceChapterId && <Badge tone="info">replaces chapter</Badge>}
+                      {i.autoMerge && <Badge tone="info">merged unit</Badge>}
+                      {!!i.skipPages && <Badge tone="neutral">skip first {i.skipPages}p</Badge>}
                     </div>
                     {!i.replaceChapterId && (
                       <div className="flex items-center gap-2">

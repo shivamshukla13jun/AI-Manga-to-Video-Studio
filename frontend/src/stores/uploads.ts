@@ -13,6 +13,10 @@ export interface UploadItem {
   chapterNumber?: number;
   chapterTitle: string;
   replaceChapterId?: string;
+  /** Leading pages to drop at extraction (cover/credit pages) */
+  skipPages?: number;
+  /** Upload is a client-built merged unit — server stores it as a merged chapter with its PDF */
+  autoMerge?: boolean;
   status: UploadStatus;
   /** bytes confirmed by the server + bytes of the in-flight chunk */
   uploadedBytes: number;
@@ -25,7 +29,7 @@ export interface UploadItem {
 
 interface UploadState {
   items: UploadItem[];
-  add: (projectId: string, files: File[], opts?: { replaceChapterId?: string }) => void;
+  add: (projectId: string, files: File[], opts?: { replaceChapterId?: string; skipPages?: number; autoMerge?: boolean }) => void;
   update: (id: string, patch: Partial<UploadItem>) => void;
   remove: (id: string) => void;
   clearFinished: (projectId: string) => void;
@@ -80,6 +84,8 @@ export const useUploads = create<UploadState>((set, get) => {
         chapterNumber: item.chapterNumber,
         chapterTitle: item.chapterTitle || undefined,
         replaceChapterId: item.replaceChapterId,
+        skipPages: item.skipPages || undefined,
+        autoMerge: item.autoMerge || undefined,
       });
       const received = new Set(session.received);
       let confirmed = [...received].reduce((sum, i) => sum + Math.min(session.chunkSize, item.file.size - i * session.chunkSize), 0);
@@ -135,6 +141,8 @@ export const useUploads = create<UploadState>((set, get) => {
               chapterNumber: n,
               chapterTitle: n !== undefined ? `Chapter ${n}` : file.name.replace(/\.[^.]+$/, ''),
               replaceChapterId: opts?.replaceChapterId,
+              skipPages: opts?.skipPages,
+              autoMerge: opts?.autoMerge,
               status: 'pending',
               uploadedBytes: 0,
               warnings: [],

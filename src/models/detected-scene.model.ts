@@ -18,7 +18,7 @@ export interface IDialogue {
 
 export interface ISceneSnapshot {
   at: Date;
-  source: 'ai' | 'user';
+  source: 'ai' | 'cv' | 'user';
   note?: string;
   data: Record<string, unknown>;
 }
@@ -42,7 +42,7 @@ export interface IDetectedSceneDocument extends Document {
   dialogues: IDialogue[];
   storyContext?: string;
   confidence?: number;
-  source: 'ai' | 'user';
+  source: 'ai' | 'cv' | 'user';
   /** Locks the scene against silent AI overwrites */
   userEdited: boolean;
   version: number;
@@ -89,7 +89,7 @@ const sceneSchema = new Schema<IDetectedSceneDocument>(
     dialogues: { type: [dialogueSchema], default: [] },
     storyContext: String,
     confidence: { type: Number, min: 0, max: 1 },
-    source: { type: String, enum: ['ai', 'user'], default: 'ai' },
+    source: { type: String, enum: ['ai', 'cv', 'user'], default: 'cv' },
     userEdited: { type: Boolean, default: false },
     version: { type: Number, default: 1 },
     history: {

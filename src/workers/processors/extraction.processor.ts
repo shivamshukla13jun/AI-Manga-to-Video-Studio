@@ -3,7 +3,10 @@ import { Types } from 'mongoose';
 import MangaChapter from 'models/manga-chapter.model';
 import ComicArchive from 'models/comic-archive.model';
 import ComicImage, { IComicImageDocument } from 'models/comic-image.model';
+import PdfExport from 'models/pdf-export.model';
 import { registerJobHandler, NonRetryableError } from 'libs/jobs/runner';
+import { enqueueJob } from 'libs/jobs/job.service';
+import { sanitizeFilename } from 'libs/studio/paths';
 import { openComicArchive, ArchiveError, ArchiveImageEntry } from 'libs/studio/archive';
 import { deleteFileById, projectFolder, resolveLocal, storeLocalFile } from 'libs/studio/media';
 import { makeTempDir, removeDir, sha256File, mimeForExt } from 'libs/studio/paths';
@@ -48,6 +51,9 @@ registerJobHandler<{ chapterId: string }>('cbz-extraction', async (ctx) => {
   if (!chapter) throw new NonRetryableError('Chapter no longer exists');
   const archiveDoc = await ComicArchive.findById(chapter.archive);
   if (!archiveDoc) throw new NonRetryableError('Chapter archive not found');
+  if (!archiveDoc.file) {
+    throw new NonRetryableError('The original CBZ was removed after extraction — replace the archive to re-extract');
+  }
 
   chapter.status = 'extracting';
   chapter.error = undefined;
@@ -66,11 +72,18 @@ registerJobHandler<{ chapterId: string }>('cbz-extraction', async (ctx) => {
     }
 
     try {
-      const { images, skipped } = archive.listing;
-      if (!images.length) throw new NonRetryableError('Archive contains no supported images');
+      const { images: listingImages, skipped } = archive.listing;
+      const skipPages = chapter.skipPages || 0;
+      const images = listingImages.slice(skipPages);
+      if (!images.length) {
+        throw new NonRetryableError(
+          skipPages ? `Skipping the first ${skipPages} page(s) leaves no images` : 'Archive contains no supported images'
+        );
+      }
       if (skipped.length) await ctx.log(`Skipped ${skipped.length} non-image entries`, 'warn');
+      if (skipPages) await ctx.log(`Skipping the first ${skipPages} page(s) of the archive`);
       archiveDoc.entryCount = archive.listing.entryCount;
-      archiveDoc.imageCount = images.length;
+      archiveDoc.imageCount = listingImages.length;
       await archiveDoc.save();
 
       // Idempotent: pages already extracted from this archive are kept
@@ -145,6 +158,36 @@ registerJobHandler<{ chapterId: string }>('cbz-extraction', async (ctx) => {
       chapter.extractedAt = new Date();
       await chapter.save();
       await emitToUser(chapter.owner, 'chapter:update', serializeChapter(chapter), chapter.project);
+      // Pages are stored now — drop the CBZ bytes to save disk. The archive doc
+      // stays for dedup/metadata; PDF exports are built from ComicImage rows.
+      const cbzFile = archiveDoc.file;
+      archiveDoc.file = undefined;
+      await archiveDoc.save();
+      await deleteFileById(cbzFile);
+      // Client-merged uploads produce their ≤50MB PDF automatically.
+      if (chapter.autoMerge) {
+        const fileName = `${sanitizeFilename(chapter.title, 'merged-unit')}.pdf`;
+        const exp = await PdfExport.create({
+          owner: chapter.owner,
+          project: chapter.project,
+          fileName,
+          chapters: [chapter._id],
+          options: { pageNumbers: false, bookmarks: true, compression: 'none' },
+        });
+        const pdfJob = await enqueueJob({
+          type: 'pdf-conversion',
+          owner: chapter.owner,
+          project: chapter.project as Types.ObjectId,
+          title: `PDF — ${fileName}`,
+          payload: { exportId: String(exp._id) },
+          target: { kind: 'pdf-export', id: exp._id as Types.ObjectId },
+        });
+        exp.job = pdfJob._id as Types.ObjectId;
+        await exp.save();
+        chapter.pdfExport = exp._id as Types.ObjectId;
+        await chapter.save();
+        await emitToUser(chapter.owner, 'chapter:update', serializeChapter(chapter), chapter.project);
+      }
       return { imageCount: images.length, brokenImages: broken };
     } finally {
       archive.close();
@@ -165,7 +208,9 @@ registerJobHandler<{ imageId: string; restore?: boolean }>('image-reextract', as
   const image = await ComicImage.findById(ctx.payload.imageId);
   if (!image) throw new NonRetryableError('Image no longer exists');
   const archiveDoc = await ComicArchive.findById(image.archive);
-  if (!archiveDoc) throw new NonRetryableError('Original archive not found');
+  if (!archiveDoc?.file) {
+    throw new NonRetryableError('Original CBZ was removed after extraction — re-upload the archive to restore pages');
+  }
 
   const tempDir = await makeTempDir('reextract');
   try {

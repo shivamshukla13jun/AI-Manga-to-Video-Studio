@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { AlertTriangle, ChevronLeft, ChevronRight, ImageOff, RefreshCw, Replace, Undo2 } from 'lucide-react';
+import { AlertTriangle, ChevronLeft, ChevronRight, ImageOff, RefreshCw, Replace, Trash2, Undo2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { NativeSelect } from '@/components/ui/input';
 import { Badge, Dialog, DialogContent } from '@/components/ui/primitives';
-import { EmptyState, ErrorState, LoadingState } from '@/components/common/states';
+import { ConfirmDialog, EmptyState, ErrorState, LoadingState } from '@/components/common/states';
 import { useAction, useChapterImages } from '@/lib/queries';
 import { api } from '@/lib/api';
 import { formatBytes } from '@/lib/utils';
@@ -86,8 +86,14 @@ export const PagesViewer = ({ chapters, chapterId, onChapterChange }: { chapters
 const PageDialog = ({ images, index, onIndex, onClose }: { images: ComicImage[]; index: number; onIndex: (i: number) => void; onClose: () => void }) => {
   const img = images[index];
   const fileInput = useRef<HTMLInputElement>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const reextract = useAction(() => api.post(`/api/manga/images/${img.id}/reextract`), { success: 'Re-extraction queued' });
   const restore = useAction(() => api.post(`/api/manga/images/${img.id}/restore`), { success: 'Restoring original page' });
+  const remove = useAction(() => api.del(`/api/manga/images/${img.id}`), {
+    success: 'Page deleted',
+    invalidate: [['chapter-images', img.chapter], ['chapters']],
+    onSuccess: () => (images.length > 1 ? onIndex(Math.min(index, images.length - 2)) : onClose()),
+  });
   const replace = useAction(
     (file: File) => {
       const fd = new FormData();
@@ -142,6 +148,10 @@ const PageDialog = ({ images, index, onIndex, onClose }: { images: ComicImage[];
                 <Undo2 /> Restore original
               </Button>
             )}
+            <div className="mt-2 text-[10px] font-semibold uppercase tracking-wider text-dim">Danger</div>
+            <Button size="sm" variant="danger" onClick={() => setConfirmDelete(true)}>
+              <Trash2 /> Delete page
+            </Button>
             <input
               ref={fileInput}
               type="file"
@@ -160,6 +170,16 @@ const PageDialog = ({ images, index, onIndex, onClose }: { images: ComicImage[];
           </div>
         </div>
       </DialogContent>
+      <ConfirmDialog
+        open={confirmDelete}
+        onOpenChange={setConfirmDelete}
+        title={`Delete page ${img.index + 1}?`}
+        description="The page is permanently removed. Scenes that only used this page are deleted too; narration segments and timeline clips referencing them are updated."
+        confirmLabel="Delete page"
+        danger
+        loading={remove.isPending}
+        onConfirm={() => remove.mutate()}
+      />
     </Dialog>
   );
 };

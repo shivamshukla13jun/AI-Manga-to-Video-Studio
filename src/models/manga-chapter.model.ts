@@ -12,6 +12,14 @@ export interface IMangaChapterDocument extends Document {
   /** Display / reading order inside the project */
   order: number;
   archive?: Types.ObjectId;
+  /** 'merged' = synthetic chapter produced by merging several source chapters into one PDF unit */
+  kind: 'chapter' | 'merged';
+  sourceChapters: Types.ObjectId[];
+  /** The merged PDF export this unit was built from */
+  pdfExport?: Types.ObjectId;
+  /** Leading archive pages skipped during extraction (cover/credit pages) */
+  skipPages: number;
+  autoMerge: boolean;
   status: ChapterStatus;
   imageCount: number;
   brokenImageCount: number;
@@ -33,6 +41,11 @@ const chapterSchema = new Schema<IMangaChapterDocument>(
     title: { type: String, required: true, trim: true, maxlength: 200 },
     order: { type: Number, required: true },
     archive: { type: Schema.Types.ObjectId, ref: 'ComicArchive' },
+    kind: { type: String, enum: ['chapter', 'merged'], default: 'chapter' },
+    sourceChapters: [{ type: Schema.Types.ObjectId, ref: 'MangaChapter' }],
+    pdfExport: { type: Schema.Types.ObjectId, ref: 'PdfExport' },
+    skipPages: { type: Number, default: 0, min: 0 },
+    autoMerge: { type: Boolean, default: false },
     status: { type: String, enum: CHAPTER_STATUSES, default: 'uploaded' },
     imageCount: { type: Number, default: 0 },
     brokenImageCount: { type: Number, default: 0 },

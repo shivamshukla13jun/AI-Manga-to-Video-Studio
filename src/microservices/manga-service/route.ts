@@ -9,6 +9,7 @@ import {
   chapterReorderSchema,
   chapterUpdateSchema,
   groupSchema,
+  mergeSchema,
   projectCreateSchema,
   projectUpdateSchema,
   uploadCompleteSchema,
@@ -33,12 +34,14 @@ router
 router.post('/projects/:projectId/cover', imageUpload('cover'), c.uploadCover);
 
 router.get('/projects/:projectId/chapters', c.listChapters);
+router.post('/projects/:projectId/merge', v(mergeSchema), c.mergeChapters);
 router.put('/projects/:projectId/chapters/reorder', v(chapterReorderSchema), c.reorderChapters);
 router.put('/projects/:projectId/chapters/renumber', v(chapterRenumberSchema), c.renumberChapters);
 router.route('/chapters/:chapterId').put(v(chapterUpdateSchema), c.updateChapter).delete(c.removeChapter);
 router.post('/chapters/:chapterId/extract', c.reextractChapter);
 router.get('/chapters/:chapterId/images', c.listChapterImages);
 
+router.delete('/images/:imageId', c.removeImage);
 router.post('/images/:imageId/reextract', c.reextractImage);
 router.post('/images/:imageId/replace', imageUpload('image'), c.replaceImage);
 router.post('/images/:imageId/restore', c.restoreImage);

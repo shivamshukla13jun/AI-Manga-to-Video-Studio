@@ -8,14 +8,18 @@ import StorySegment, { IStorySegmentDocument } from 'models/story-segment.model'
 import Character from 'models/character.model';
 import CostEstimate from 'models/cost-estimate.model';
 import { asyncHandler, assertObjectId, notFound, ok, ownerFilter } from 'libs/studio/http';
-import { enqueueJob, serializeJob } from 'libs/jobs/job.service';
+import { broadcastJob, enqueueJob, serializeJob } from 'libs/jobs/job.service';
 import { approveEstimate, serializeEstimate } from 'libs/pricing/estimator';
 import { getSettings } from 'libs/pricing/pricing.service';
-import { deleteFileById } from 'libs/studio/media';
+import { deleteFileById, signMediaPath } from 'libs/studio/media';
+import PdfExport from 'models/pdf-export.model';
+import config from 'config/env';
 import { countWords } from 'libs/ai/prompts';
 import { getVisionProvider } from 'libs/ai/provider';
 import { getChapter, getProject } from 'microservices/manga-service/manga.service';
-import { estimateSeconds, wordsPerMinute } from 'workers/processors/story.processor';
+import { estimateSeconds, generateRange, wordsPerMinute } from 'workers/processors/story.processor';
+import { JobContext, NonRetryableError } from 'libs/jobs/runner';
+import ProcessingJob from 'models/processing-job.model';
 import { snapshotScene } from 'workers/processors/scene.processor';
 import { serializeCharacter, serializeScene, serializeSegment } from './story.serializers';
 import { estimateSceneDetection, estimateStory } from './story.estimates';
@@ -88,15 +92,34 @@ export const projectOverview = asyncHandler(async (req, res) => {
   ]);
   const sc = new Map(sceneCounts.map((s) => [String(s._id), s]));
   const sg = new Map(segCounts.map((s) => [String(s._id), s]));
+  const expIds = chapters.map((c) => c.pdfExport).filter(Boolean);
+  const exports = await PdfExport.find({ _id: { $in: expIds } });
+  const expById = new Map(exports.map((e) => [String(e._id), e]));
   ok(res, {
     project: { id: String(project._id), title: project.title, narrationLanguage: language, narrationMode: mode, continuitySummary: project.continuitySummary, continuityThrough: project.continuityThrough },
-    aiConfigured: getVisionProvider().configured,
+    aiConfigured: settings.aiProvider === 'local' || getVisionProvider().configured,
+    aiProvider: settings.aiProvider,
     language,
     mode,
     chapters: chapters.map((c) => ({
       id: String(c._id),
       number: c.number,
       title: c.title,
+      kind: c.kind || 'chapter',
+      sourceChapters: (c.sourceChapters || []).map(String),
+      pdf: (() => {
+        const e = c.pdfExport ? expById.get(String(c.pdfExport)) : undefined;
+        return e
+          ? {
+              id: String(e._id),
+              fileName: e.fileName,
+              status: e.status,
+              pageCount: e.pageCount,
+              size: e.size,
+              url: e.file ? `${config.BASE_URL}${signMediaPath(e.file)}` : undefined,
+            }
+          : undefined;
+      })(),
       status: c.status,
       imageCount: c.imageCount,
       brokenImageCount: c.brokenImageCount,
@@ -148,7 +171,7 @@ export const detectScenes = asyncHandler(async (req, res) => {
   if (chapters.length !== req.body.chapterIds.length) throw new AppError('Some chapters were not found in this project', 400);
   const notReady = chapters.filter((c) => c.status !== 'ready');
   if (notReady.length) throw new AppError(`Chapter(s) ${notReady.map((c) => c.number).join(', ')} are not extracted yet`, 400);
-  const est = await approveEstimate(project.owner, req.body.estimateId, 'scene-detection', { chapterIds: req.body.chapterIds });
+  // Panel detection always runs on the Python CV service — free, no estimate gate.
   const jobs = [];
   for (const c of chapters) {
     jobs.push(
@@ -157,14 +180,12 @@ export const detectScenes = asyncHandler(async (req, res) => {
         owner: project.owner,
         project: project._id as Types.ObjectId,
         title: `Detect scenes — Chapter ${c.number}`,
-        payload: { chapterId: String(c._id), overwriteEdited: req.body.overwriteEdited, redetectPanels: req.body.redetectPanels, estimateId: String(est._id) },
+        payload: { chapterId: String(c._id), overwriteEdited: req.body.overwriteEdited, redetectPanels: req.body.redetectPanels },
         target: { kind: 'chapter', id: c._id as Types.ObjectId },
         idempotencyKey: `scenes:${c._id}`,
       })
     );
   }
-  est.job = jobs[0]._id as Types.ObjectId;
-  await est.save();
   ok(res, jobs.map((j) => serializeJob(j)), 202);
 });
 
@@ -176,18 +197,79 @@ export const generateStory = asyncHandler(async (req, res) => {
   const mode = req.body.mode || settings.narrationMode;
   const count = await MangaChapter.countDocuments({ _id: { $in: chapterIds }, project: project._id });
   if (count !== chapterIds.length) throw new AppError('Some chapters were not found in this project', 400);
-  const est = await approveEstimate(project.owner, req.body.estimateId, 'story-generation', { chapterIds, language, mode });
+  // Local AI is free — no paid-estimate confirmation needed.
+  const est = settings.aiProvider === 'local' ? undefined : await approveEstimate(project.owner, req.body.estimateId, 'story-generation', { chapterIds, language, mode });
+  const payload = { projectId: String(project._id), chapterIds, language, mode, overwriteEdited: req.body.overwriteEdited, estimateId: est ? String(est._id) : undefined, provider: settings.aiProvider };
+  const title = `Write ${mode} narration (${language}) — ${chapterIds.length} chapter(s)`;
+
+  // Direct mode: run the generation inline so errors surface in this response.
+  if (req.body.direct) {
+    req.socket.setTimeout(0); // a whole batch can take several minutes — no request timeout
+    const job = await ProcessingJob.create({
+      type: 'story-generation',
+      owner: project.owner,
+      project: project._id,
+      title,
+      payload,
+      target: { kind: 'project', id: project._id },
+      status: 'active',
+      progress: 1,
+      attempts: 1,
+      startedAt: new Date(),
+      logs: [{ at: new Date(), level: 'info', message: 'Direct run (no queue)' }],
+    });
+    const controller = new AbortController();
+    const ctx: JobContext<typeof payload> = {
+      job,
+      payload,
+      signal: controller.signal,
+      isRerun: false,
+      progress: async (percent, stage) => {
+        await ProcessingJob.updateOne({ _id: job._id }, { $set: { progress: Math.max(0, Math.min(100, percent)), ...(stage ? { stage } : {}) } });
+      },
+      log: async (message, level = 'info') => {
+        await ProcessingJob.updateOne({ _id: job._id }, { $push: { logs: { $each: [{ at: new Date(), level, message }], $slice: -500 } } });
+      },
+      throwIfCancelled: () => {},
+    };
+    try {
+      const result = await generateRange(ctx);
+      const done = await ProcessingJob.findByIdAndUpdate(
+        job._id,
+        { $set: { status: 'completed', progress: 100, result, completedAt: new Date() }, $push: { logs: { $each: [{ at: new Date(), level: 'info', message: 'Completed' }], $slice: -500 } } },
+        { new: true }
+      );
+      if (done) await broadcastJob(done);
+      if (est) {
+        est.job = job._id as Types.ObjectId;
+        await est.save();
+      }
+      ok(res, { job: serializeJob(done!), result }, 200);
+      return;
+    } catch (error: any) {
+      const failed = await ProcessingJob.findByIdAndUpdate(
+        job._id,
+        { $set: { status: 'failed', error: { message: error.message || 'Story generation failed' }, completedAt: new Date() }, $push: { logs: { $each: [{ at: new Date(), level: 'error', message: error.message || 'failed' }], $slice: -500 } } },
+        { new: true }
+      );
+      if (failed) await broadcastJob(failed);
+      throw new AppError(error.message || 'Story generation failed', error instanceof NonRetryableError ? 400 : 500);
+    }
+  }
+
   const job = await enqueueJob({
     type: 'story-generation',
     owner: project.owner,
     project: project._id as Types.ObjectId,
-    title: `Write ${mode} narration (${language}) — ${chapterIds.length} chapter(s)`,
-    payload: { projectId: String(project._id), chapterIds, language, mode, overwriteEdited: req.body.overwriteEdited, estimateId: String(est._id) },
+    title,
+    payload,
     target: { kind: 'project', id: project._id as Types.ObjectId },
     idempotencyKey: `story:${project._id}:${language}:${mode}`,
   });
-  est.job = job._id as Types.ObjectId;
-  await est.save();
+  if (est) {
+    est.job = job._id as Types.ObjectId;
+    await est.save();
+  }
   ok(res, serializeJob(job), 202);
 });
 

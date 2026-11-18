@@ -5,8 +5,8 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Badge, Checkbox, Slider, Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/primitives';
 import { Input, NativeSelect } from '@/components/ui/input';
-import { EmptyState, LoadingState, PageHeader } from '@/components/common/states';
-import { useAction, useProjectAudio, useProjects, useSegments, useStudioSettings, useVoices, useVoiceStatus, voiceApi } from '@/lib/queries';
+import { EmptyState, JobErrorBanner, LoadingState, PageHeader } from '@/components/common/states';
+import { useAction, useJobs, useProjectAudio, useProjects, useSegments, useStudioSettings, useVoices, useVoiceStatus, voiceApi } from '@/lib/queries';
 import { useProjectRoom } from '@/lib/socket';
 import { formatCost, formatDuration } from '@/lib/utils';
 import type { CostEstimate, GeneratedAudio, StorySegment } from '@/lib/types';
@@ -77,6 +77,8 @@ const Studio = ({ projectId }: { projectId: string }) => {
   const [mode, setMode] = useState('recap');
   const segments = useSegments(projectId, language, mode);
   const audio = useProjectAudio(projectId);
+  const ttsJobs = useJobs({ project: projectId });
+  const failedTts = (ttsJobs.data || []).find((j) => j.type === 'tts-generation' && j.status === 'failed');
 
   const [provider, setProvider] = useState<'gemini' | 'local'>('gemini');
   const [voiceId, setVoiceId] = useState('');
@@ -174,6 +176,7 @@ const Studio = ({ projectId }: { projectId: string }) => {
           <span className="w-8 font-mono text-[10px]">{speed.toFixed(2)}×</span>
         </div>
       </div>
+      <JobErrorBanner jobs={failedTts ? [failedTts] : []} />
 
       <Tabs defaultValue="narration" className="flex min-h-0 flex-1 flex-col">
         <div className="flex items-center gap-2 border-b border-line bg-panel px-4 py-1.5">

@@ -1,3 +1,4 @@
+import fs from 'fs';
 import config from 'config/env';
 import { openSharp } from './images';
 
@@ -28,7 +29,7 @@ const MAX_DEPTH = 5;
  * Returns normalized boxes in reading order. A region without gutters
  * (full-bleed art) is returned whole — the AI pass refines it.
  */
-export const detectPanels = async (input: string | Buffer, opts: { rtl?: boolean } = {}): Promise<NBox[]> => {
+const detectPanelsLocal = async (input: string | Buffer, opts: { rtl?: boolean } = {}): Promise<NBox[]> => {
   const meta = await openSharp(input).metadata();
   const srcW = meta.width || 0;
   const srcH = meta.height || 0;
@@ -127,6 +128,42 @@ export const detectPanels = async (input: string | Buffer, opts: { rtl?: boolean
       width: (l.x1 - l.x0) / W,
       height: (l.y1 - l.y0) / H,
     }));
+};
+
+let panelServiceDownUntil = 0;
+
+/** Try the python ai-service detector first; fall back to the built-in XY-cut. */
+export const detectPanels = async (input: string | Buffer, opts: { rtl?: boolean } = {}): Promise<NBox[]> => {
+  const base = config.PANEL_DETECT_URL;
+  if (base && Date.now() >= panelServiceDownUntil) {
+    try {
+      const buf = Buffer.isBuffer(input) ? input : await fs.promises.readFile(input);
+      const res = await fetch(`${base}/detect-panels${opts.rtl ? '?rtl=true' : ''}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: buf as any,
+        signal: AbortSignal.timeout(30000),
+      });
+      if (res.ok) {
+        const data: any = await res.json();
+        if (Array.isArray(data?.panels) && data.panels.length) {
+          return data.panels.map((p: any) => ({ x: p.x, y: p.y, width: p.width, height: p.height }));
+        }
+        if (res.status === 503) panelServiceDownUntil = Date.now() + 60_000;
+      }
+    } catch {
+      panelServiceDownUntil = Date.now() + 30_000; // avoid hammering a downed service per page
+    }
+  }
+  return detectPanelsLocal(input, opts);
+};
+
+const clampBox = (b: any): NBox | null => {
+  const x = Math.min(1, Math.max(0, Number(b?.x) || 0));
+  const y = Math.min(1, Math.max(0, Number(b?.y) || 0));
+  const width = Math.min(1 - x, Math.max(0, Number(b?.width) || 0));
+  const height = Math.min(1 - y, Math.max(0, Number(b?.height) || 0));
+  return width >= 0.02 && height >= 0.02 ? { x, y, width, height } : null;
 };
 
 export const toPixels = (b: NBox, width: number, height: number) => {

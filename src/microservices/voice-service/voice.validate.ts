@@ -58,6 +58,7 @@ export const settingsSchema = z.object({
   pricingTier: z.enum(['standard', 'batch']).optional(),
   defaultTtsProvider: providerSchema.optional(),
   defaultVoiceProfile: objectId.nullish(),
+  aiProvider: z.enum(['gemini', 'local']).optional(),
   narrationLanguage: z.string().min(2).max(16).optional(),
   narrationMode: z.enum(['original', 'recap']).optional(),
   wordsPerMinute: z.record(z.string(), z.number().min(40).max(400)).optional(),

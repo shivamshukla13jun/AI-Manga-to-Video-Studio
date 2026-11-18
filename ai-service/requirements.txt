@@ -2,6 +2,15 @@ fastapi>=0.115,<1.0
 uvicorn[standard]>=0.30,<1.0
 pydantic>=2.7,<3.0
 
+# panel detection (scene service — required for /detect-panels)
+opencv-python-headless>=4.9
+numpy>=1.26
+
+# local story generation (/generate-json) — Phi-3.5-vision ONNX, CPU only, no Ollama
+onnxruntime-genai>=0.7,<1.0
+huggingface-hub>=0.24,<1.0
+Pillow>=10.0
+
 # ---- optional engines (install what you need) ----
 # piper-tts>=1.2,<2.0          # Piper voices: place .onnx files in ./voices
 # kokoro>=0.9,<1.0             # Kokoro TTS (also needs: soundfile, misaki[en] or misaki[hi])

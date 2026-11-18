@@ -74,6 +74,8 @@ export interface CreateUploadInput {
   chapterNumber?: number;
   chapterTitle?: string;
   replaceChapterId?: string;
+  skipPages?: number;
+  autoMerge?: boolean;
 }
 
 export const createUploadSession = async (
@@ -106,6 +108,8 @@ export const createUploadSession = async (
     if (existing && fs.existsSync(partPath(existing))) {
       if (input.chapterNumber !== undefined) existing.chapterNumber = input.chapterNumber;
       if (input.chapterTitle !== undefined) existing.chapterTitle = input.chapterTitle;
+      if (input.skipPages !== undefined) existing.skipPages = input.skipPages;
+      if (input.autoMerge !== undefined) existing.autoMerge = input.autoMerge;
       await existing.save();
       return { session: existing, resumed: true, warnings: [] as string[] };
     }
@@ -123,6 +127,8 @@ export const createUploadSession = async (
     chapterNumber: input.chapterNumber,
     chapterTitle: input.chapterTitle?.trim() || undefined,
     replaceChapter: replaceChapter?._id,
+    skipPages: input.skipPages || undefined,
+    autoMerge: input.autoMerge || undefined,
     expiresAt: new Date(Date.now() + config.UPLOAD_SESSION_TTL_HOURS * 3600_000),
   });
   await fs.promises.mkdir(uploadDir(), { recursive: true });
@@ -240,6 +246,8 @@ export const completeUpload = async (
     return fail(error instanceof ArchiveError ? error.message : `Unreadable archive: ${error.message}`);
   }
   if (!imageCount) return fail('Archive contains no JPG, PNG or WebP images');
+  const skipPages = Math.max(0, Math.floor(session.skipPages || 0));
+  if (skipPages >= imageCount) return fail(`Skipping the first ${skipPages} page(s) leaves no pages to extract`);
 
   const stored = await storeLocalFile(filePath, {
     folder: projectFolder(project._id, 'archives'),
@@ -266,8 +274,17 @@ export const completeUpload = async (
     if (session.replaceChapter) {
       const existing = await MangaChapter.findById(session.replaceChapter);
       if (!existing) throw notFound('Chapter to replace');
-      await ComicArchive.updateMany({ chapter: existing._id, _id: { $ne: archive._id } }, { $set: { replaced: true } });
+      const old = await ComicArchive.find({ chapter: existing._id, _id: { $ne: archive._id } });
+      for (const a of old) {
+        const f = a.file;
+        a.file = undefined;
+        a.replaced = true;
+        await a.save();
+        await deleteFileById(f);
+      }
       existing.archive = archive._id as Types.ObjectId;
+      existing.skipPages = skipPages;
+      existing.autoMerge = !!session.autoMerge;
       existing.status = 'uploaded';
       existing.error = undefined;
       chapter = await existing.save();
@@ -284,6 +301,9 @@ export const completeUpload = async (
         title: session.chapterTitle || comicInfo?.title || `Chapter ${number}`,
         order: await nextChapterOrder(project._id as Types.ObjectId),
         archive: archive._id,
+        skipPages,
+        kind: session.autoMerge ? 'merged' : 'chapter',
+        autoMerge: !!session.autoMerge,
         status: 'uploaded',
         imageCount,
       });
@@ -319,12 +339,16 @@ export const abortUpload = async (session: IUploadSessionDocument) => {
 // ---------------------------------------------------------------------------
 // Deletion — removes derived media and original archives of the chapter
 // ---------------------------------------------------------------------------
-export const deleteChapterMedia = async (chapterId: Types.ObjectId | string) => {
-  const images = await ComicImage.find({ chapter: chapterId }).select('file originalFile thumbnail');
-  for (const img of images) {
-    await deleteFileById(img.thumbnail);
-    if (img.file && String(img.file) !== String(img.originalFile)) await deleteFileById(img.file);
-    await deleteFileById(img.originalFile);
+export const deleteChapterMedia = async (chapterId: Types.ObjectId | string, borrowed = false) => {
+  // Merged units built from other chapters only borrow file refs — never delete
+  // them. An uploaded merged unit owns its files and deletes them normally.
+  if (!borrowed) {
+    const images = await ComicImage.find({ chapter: chapterId }).select('file originalFile thumbnail');
+    for (const img of images) {
+      await deleteFileById(img.thumbnail);
+      if (img.file && String(img.file) !== String(img.originalFile)) await deleteFileById(img.file);
+      await deleteFileById(img.originalFile);
+    }
   }
   await ComicImage.deleteMany({ chapter: chapterId });
   const archives = await ComicArchive.find({ chapter: chapterId });
@@ -333,18 +357,33 @@ export const deleteChapterMedia = async (chapterId: Types.ObjectId | string) => 
 };
 
 export const deleteChapter = async (chapter: IMangaChapterDocument) => {
-  await deleteChapterMedia(chapter._id as Types.ObjectId);
+  const merged = chapter.kind === 'merged';
+  const borrowed = merged && (chapter.sourceChapters?.length ?? 0) > 0;
+  if (merged && chapter.pdfExport) {
+    const exp = await PdfExport.findById(chapter.pdfExport);
+    if (exp) {
+      if (['queued', 'processing'].includes(exp.status)) throw new AppError('This unit has a running PDF conversion — cancel it first', 409);
+      await deleteFileById(exp.file);
+      await exp.deleteOne();
+    }
+  }
+  await deleteChapterMedia(chapter._id as Types.ObjectId, borrowed);
   await ChapterGroup.updateMany({ project: chapter.project }, { $pull: { chapters: chapter._id } });
   await chapter.deleteOne();
+  // Deleting a source chapter removes the underlying page files — drop merged units built on it.
+  if (!merged) {
+    const dependents = await MangaChapter.find({ project: chapter.project, kind: 'merged', sourceChapters: chapter._id });
+    for (const m of dependents) await deleteChapter(m);
+  }
 };
 
 export const deleteProject = async (project: IMangaProjectDocument) => {
   const chapters = await MangaChapter.find({ project: project._id });
-  for (const c of chapters) await deleteChapterMedia(c._id as Types.ObjectId);
+  for (const c of chapters) await deleteChapterMedia(c._id as Types.ObjectId, c.kind === 'merged' && (c.sourceChapters?.length ?? 0) > 0);
   await MangaChapter.deleteMany({ project: project._id });
   await ChapterGroup.deleteMany({ project: project._id });
-  const exports = await PdfExport.find({ project: project._id });
-  for (const e of exports) await deleteFileById(e.file);
+  const pdfExports = await PdfExport.find({ project: project._id });
+  for (const e of pdfExports) await deleteFileById(e.file);
   await PdfExport.deleteMany({ project: project._id });
   await UploadSession.deleteMany({ project: project._id });
   await deleteFileById(project.cover);
@@ -371,4 +410,116 @@ export const resolveChapterSelection = async (
     number: 1,
     order: 1,
   });
+};
+
+// ---------------------------------------------------------------------------
+// Merge chapters into ≤50MB PDF "special chapter" units
+// Each unit is a MangaChapter{kind:'merged'} whose ComicImage rows share the
+// source pages' file refs (no duplication) + a queued PdfExport job.
+// ---------------------------------------------------------------------------
+const MERGE_LIMIT_MB = 50;
+
+export const mergeChaptersToPdfUnits = async (
+  project: IMangaProjectDocument,
+  opts: { chapterIds?: string[]; maxSizeMB?: number }
+) => {
+  const limitBytes = Math.min(Math.max(opts.maxSizeMB || MERGE_LIMIT_MB, 1), 50) * 1024 * 1024;
+  const selection = opts.chapterIds?.length
+    ? await resolveChapterSelection(project._id as Types.ObjectId, { chapterIds: opts.chapterIds })
+    : await MangaChapter.find({ project: project._id, kind: { $ne: 'merged' }, status: 'ready', archive: { $ne: null } }).sort({ order: 1 });
+  const chapters = selection.filter((c) => c.kind !== 'merged' && c.archive);
+  if (!chapters.length) throw new AppError('No ready chapters with an archive to merge', 400);
+
+  const bytes = await ComicImage.aggregate<{ _id: Types.ObjectId; bytes: number; pages: number }>([
+    { $match: { chapter: { $in: chapters.map((c) => c._id) } } },
+    { $group: { _id: '$chapter', bytes: { $sum: '$size' }, pages: { $sum: 1 } } },
+  ]);
+  const sizeOf = new Map(bytes.map((b) => [String(b._id), b]));
+
+  const batches: IMangaChapterDocument[][] = [];
+  let current: IMangaChapterDocument[] = [];
+  let currentBytes = 0;
+  for (const c of chapters) {
+    const b = sizeOf.get(String(c._id))?.bytes ?? 0;
+    if (current.length && currentBytes + b > limitBytes) {
+      batches.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(c);
+    currentBytes += b;
+  }
+  if (current.length) batches.push(current);
+  if (batches.length > 1 && batches.some((b) => b.reduce((s, c) => s + (sizeOf.get(String(c._id))?.bytes ?? 0), 0) > limitBytes)) {
+    const oversized = batches
+      .filter((b) => b.reduce((s, c) => s + (sizeOf.get(String(c._id))?.bytes ?? 0), 0) > limitBytes)
+      .flatMap((b) => b.map((c) => c.number));
+    throw new AppError(`Chapters exceed ${opts.maxSizeMB || MERGE_LIMIT_MB}MB each and can't be merged: ${oversized.join(', ')}`, 400);
+  }
+
+  const lastOrder = (await MangaChapter.findOne({ project: project._id }).sort({ order: -1 }).select('order'))?.order ?? 0;
+  const created: { chapter: IMangaChapterDocument; exportDoc: any; job: any }[] = [];
+  for (const [bi, batch] of batches.entries()) {
+    const nums = batch.map((c) => c.number).sort((a, b) => a - b);
+    const title = nums.length === 1 ? `Chapter ${nums[0]} — merged` : `Chapters ${nums[0]}–${nums[nums.length - 1]} — merged`;
+    const merged = await MangaChapter.create({
+      owner: project.owner,
+      project: project._id,
+      number: Math.max(...nums) + 0.5,
+      title,
+      order: lastOrder + bi + 1,
+      kind: 'merged',
+      sourceChapters: batch.map((c) => c._id),
+      status: 'ready',
+      extractedAt: new Date(),
+    });
+    const images = await ComicImage.find({ chapter: { $in: batch.map((c) => c._id) } }).sort({ chapter: 1, index: 1 });
+    const cloned = await ComicImage.insertMany(
+      images.map((img, i) => ({
+        owner: img.owner,
+        project: img.project,
+        chapter: merged._id,
+        archive: img.archive,
+        index: i,
+        entryName: img.entryName,
+        file: img.file,
+        originalFile: img.originalFile,
+        thumbnail: img.thumbnail,
+        width: img.width,
+        height: img.height,
+        format: img.format,
+        size: img.size,
+        sha256: img.sha256,
+        isTall: img.isTall,
+        status: img.status,
+        panels: [],
+      }))
+    );
+    merged.imageCount = cloned.length;
+
+    const fileName =
+      sanitizeFilename(`${project.title} - Chapters ${nums.join('-')}`, 'comic') + '.pdf';
+    const exportDoc = await PdfExport.create({
+      owner: project.owner,
+      project: project._id,
+      fileName,
+      chapters: [merged._id],
+      options: { pageNumbers: false, bookmarks: true, compression: 'none' },
+    });
+    const job = await enqueueJob({
+      type: 'pdf-conversion',
+      owner: project.owner,
+      project: project._id as Types.ObjectId,
+      title: `PDF — ${fileName}`,
+      payload: { exportId: String(exportDoc._id) },
+      target: { kind: 'pdf-export', id: exportDoc._id as Types.ObjectId },
+    });
+    exportDoc.job = job._id as Types.ObjectId;
+    await exportDoc.save();
+    merged.pdfExport = exportDoc._id as Types.ObjectId;
+    await merged.save();
+    await emitChapter(merged);
+    created.push({ chapter: merged, exportDoc, job });
+  }
+  return created;
 };

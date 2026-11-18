@@ -20,6 +20,9 @@ export interface IUploadSessionDocument extends Document {
   chapterTitle?: string;
   /** Replace the archive of an existing chapter instead of creating one */
   replaceChapter?: Types.ObjectId;
+  /** Leading pages to drop during extraction (cover/credit pages) */
+  skipPages?: number;
+  autoMerge?: boolean;
   status: 'uploading' | 'completing' | 'completed' | 'failed' | 'aborted';
   error?: string;
   chapter?: Types.ObjectId;
@@ -42,6 +45,8 @@ const sessionSchema = new Schema<IUploadSessionDocument>(
     chapterNumber: Number,
     chapterTitle: String,
     replaceChapter: { type: Schema.Types.ObjectId, ref: 'MangaChapter' },
+    skipPages: Number,
+    autoMerge: Boolean,
     status: {
       type: String,
       enum: ['uploading', 'completing', 'completed', 'failed', 'aborted'],

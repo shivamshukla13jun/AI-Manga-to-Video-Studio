@@ -4,13 +4,8 @@ import type { IStorySegmentDocument } from 'models/story-segment.model';
 import type { ICharacterDocument } from 'models/character.model';
 import type { IComicImageDocument } from 'models/comic-image.model';
 
-export const serializeScene = (s: IDetectedSceneDocument, images?: Map<string, IComicImageDocument>) => ({
-  id: String(s._id),
-  project: String(s.project),
-  chapter: String(s.chapter),
-  chapterNumber: s.chapterNumber,
-  order: s.order,
-  regions: s.regions.map((r) => {
+export const serializeScene = (s: IDetectedSceneDocument, images?: Map<string, IComicImageDocument>) => {
+  const regions = s.regions.map((r) => {
     const img = images?.get(String(r.image));
     return {
       image: String(r.image),
@@ -22,24 +17,33 @@ export const serializeScene = (s: IDetectedSceneDocument, images?: Map<string, I
       width: img?.width,
       height: img?.height,
     };
-  }),
-  thumbnailUrl: mediaUrl(s.thumbnail),
-  title: s.title,
-  characters: s.characters,
-  location: s.location,
-  action: s.action,
-  emotion: s.emotion,
-  description: s.description,
-  events: s.events,
-  dialogues: s.dialogues,
-  storyContext: s.storyContext,
-  confidence: s.confidence,
-  source: s.source,
-  userEdited: s.userEdited,
-  version: s.version,
-  history: s.history.map((h, i) => ({ index: i, at: h.at, source: h.source, note: h.note, hasData: !!h.data })),
-  updatedAt: s.updatedAt,
-});
+  });
+  return {
+    id: String(s._id),
+    project: String(s.project),
+    chapter: String(s.chapter),
+    chapterNumber: s.chapterNumber,
+    order: s.order,
+    regions,
+    // Scenes store no files — the card thumbnail falls back to the first region's page thumb
+    thumbnailUrl: mediaUrl(s.thumbnail) ?? regions[0]?.thumbnailUrl ?? null,
+    title: s.title,
+    characters: s.characters,
+    location: s.location,
+    action: s.action,
+    emotion: s.emotion,
+    description: s.description,
+    events: s.events,
+    dialogues: s.dialogues,
+    storyContext: s.storyContext,
+    confidence: s.confidence,
+    source: s.source,
+    userEdited: s.userEdited,
+    version: s.version,
+    history: s.history.map((h, i) => ({ index: i, at: h.at, source: h.source, note: h.note, hasData: !!h.data })),
+    updatedAt: s.updatedAt,
+  };
+};
 
 export const serializeSegment = (g: IStorySegmentDocument) => ({
   id: String(g._id),

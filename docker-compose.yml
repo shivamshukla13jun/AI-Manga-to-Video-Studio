@@ -1,8 +1,9 @@
+
 services:
   redis:
     image: redis:latest
     container_name: redis
-    command: ["redis-server","--bind", "0.0.0.0",  "--requirepass", "redis123"]
+    command: ["redis-server", "--bind", "0.0.0.0", "--requirepass", "redis123"]
     ports:
       - "6379:6379"
     restart: unless-stopped
@@ -31,30 +32,16 @@ services:
       interval: 15s
       timeout: 10s
       retries: 5
+
   suwayomi:
     image: ghcr.io/suwayomi/suwayomi-server:preview
-    # user: 1000:1000
     environment:
-      - TZ=Etc/UTC # Use TZ database name from https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
-      # Comment these out if you do not use the flaresolverr container at the bottom of this file
+      - TZ=Etc/UTC
       - FLARESOLVERR_ENABLED=true
       - FLARESOLVERR_URL=http://flaresolverr:8191
-#  #################################################################################################
-#
-#    !!! IMPORTANT !!!
-#     - server settings can be changed during runtime in the WebUI
-#     - providing an environment variable will OVERWRITE the current setting value when starting the container
-#
-#  #################################################################################################
-#
-#    example for setting env vars:
-#
       - BIND_IP=0.0.0.0
       - BIND_PORT=4567
-#      - SOCKS_PROXY_ENABLED=false
       - DOWNLOAD_AS_CBZ=true
-#      - AUTH_MODE=basic_auth
-#      - AUTH_USERNAME=manga
       - AUTH_PASSWORD=hello123
       - EXTENSION_STORES=["https://github.com/keiyoushi/extensions/raw/repo/index.pb"]
     volumes:
@@ -67,21 +54,19 @@ services:
     image: ghcr.io/thephaseless/byparr:latest
     container_name: flaresolverr
     environment:
-      - TZ=Etc/UTC # Use TZ database name from https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+      - TZ=Etc/UTC
     restart: unless-stopped
 
-  # Optional local TTS inference service. Enable with:
-  #   docker compose --profile local-ai up -d local-tts
-  # Then point LOCAL_TTS_URL=http://127.0.0.1:8001 at it (already the default).
-  local-tts:
-    build: ./ai-service
-    container_name: manga-studio-local-tts
-    profiles: ["local-ai"]
-    ports:
-      - "8001:8001"
-    restart: unless-stopped
-    volumes:
-      - ./ai-service/voices:/app/voices   # drop Piper .onnx voice models here
+  # Local AI service (TTS + panel CV + local VLM story generation — no Ollama needed)
+  # local-tts:
+  #   build: ./ai-service
+  #   container_name: manga-studio-local-tts
+  #   profiles: ["local-ai"]
+  #   ports:
+  #     - "8001:8001"
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ./ai-service/voices:/app/voices
 
 volumes:
   redis_data:

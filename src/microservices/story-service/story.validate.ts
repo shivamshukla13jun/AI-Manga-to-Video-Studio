@@ -35,6 +35,8 @@ export const storyEstimateSchema = chapterSelectionSchema.extend({
 export const generateSchema = storyEstimateSchema.extend({
   estimateId: objectId.optional(),
   overwriteEdited: z.boolean().default(false),
+  /** true → run inline in this request (errors returned directly); false → background job */
+  direct: z.boolean().default(false),
 });
 
 export const sceneUpdateSchema = z.object({

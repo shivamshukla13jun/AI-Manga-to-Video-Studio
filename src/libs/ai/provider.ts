@@ -51,10 +51,15 @@ class GeminiVisionProvider implements VisionLanguageProvider {
     return geminiConfigured();
   }
   modelFor(kind: 'vision' | 'text') {
-    return (kind === 'vision' ? config.GEMINI_VISION_MODEL : config.GEMINI_STORY_MODEL) as string;
+    return this.modelsFor(kind)[0];
+  }
+  /** Ordered fallback chain for the kind — first model wins, next tried on rate limits */
+  private modelsFor(kind: 'vision' | 'text'): string[] {
+    const list = (kind === 'vision' ? config.GEMINI_VISION_MODELS : config.GEMINI_STORY_MODELS) as string;
+    return list.split(',').map((m) => m.trim()).filter(Boolean);
   }
   async generateJson<T>(req: JsonRequest): Promise<JsonResult<T>> {
-    const model = this.modelFor(req.kind);
+    const models = this.modelsFor(req.kind);
     const buildInput = (useFiles: boolean): InteractionContent[] => {
       const input: InteractionContent[] = [{ type: 'text', text: req.prompt }];
       for (const img of req.images || []) {
@@ -69,7 +74,7 @@ class GeminiVisionProvider implements VisionLanguageProvider {
     };
     const call = (useFiles: boolean) =>
       createInteraction({
-        model,
+        model: models,
         input: buildInput(useFiles),
         systemInstruction: req.system,
         schema: req.schema,
@@ -86,12 +91,62 @@ class GeminiVisionProvider implements VisionLanguageProvider {
       this.fileUrisBroken = true;
       r = await call(false);
     }
-    return { data: r.json as T, usage: r.usage, model, provider: this.name };
+    return { data: r.json as T, usage: r.usage, model: r.model, provider: this.name };
   }
 }
 
 
-const providers: Record<string, VisionLanguageProvider> = { gemini: new GeminiVisionProvider() };
+/**
+ * Local provider — proxies generation to the Python ai-service
+ * (`/generate-json` → local VLM via onnxruntime-genai). Free: no cloud tokens, no Files API.
+ */
+class LocalVisionProvider implements VisionLanguageProvider {
+  readonly name = 'local';
+  get configured() {
+    return !!config.PANEL_DETECT_URL;
+  }
+  modelFor() {
+    return config.LOCAL_STORY_MODEL || 'local-llm';
+  }
+  async generateJson<T>(req: JsonRequest): Promise<JsonResult<T>> {
+    const base = (config.PANEL_DETECT_URL || 'http://127.0.0.1:8001').replace(/\/+$/, '');
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 900_000);
+    const onAbort = () => ac.abort();
+    req.signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      const res = await fetch(`${base}/generate-json`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: ac.signal,
+        body: JSON.stringify({
+          system: req.system,
+          prompt: req.prompt,
+          schema: req.schema,
+          images: (req.images || []).map((i) => ({ data: i.data.toString('base64'), mimeType: i.mimeType, label: i.label })),
+        }),
+      });
+      const body: any = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg = body?.detail || `Local AI service error ${res.status}`;
+        const err: any = new Error(msg);
+        err.retryable = res.status >= 500 || res.status === 503;
+        throw err;
+      }
+      return {
+        data: body.data as T,
+        usage: { inputTokens: body.usage?.inputTokens || 0, outputTokens: body.usage?.outputTokens || 0, thoughtTokens: 0, totalTokens: (body.usage?.inputTokens || 0) + (body.usage?.outputTokens || 0) },
+        model: body.model || this.modelFor(),
+        provider: this.name,
+      };
+    } finally {
+      clearTimeout(timer);
+      req.signal?.removeEventListener('abort', onAbort);
+    }
+  }
+}
+
+const providers: Record<string, VisionLanguageProvider> = { gemini: new GeminiVisionProvider(), local: new LocalVisionProvider() };
 
 export const getVisionProvider = (name = process.env.AI_PROVIDER || 'gemini'): VisionLanguageProvider => {
   const p = providers[name];

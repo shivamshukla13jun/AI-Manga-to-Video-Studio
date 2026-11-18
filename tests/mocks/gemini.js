@@ -111,7 +111,12 @@ const respond = (body) => {
 
   // Story generation -> { segments, chapterSummary, continuitySummary, characters }
   if (required.includes('segments')) {
-    const scenes = jsonLine(lines, 'Scenes (JSON, chronological): ');
+    // Scenes arrive either as "Scenes (JSON, chronological): [...]" or as SCENE n image labels.
+    let scenes = jsonLine(lines, 'Scenes (JSON, chronological): ');
+    if (!scenes.length) {
+      const n = Math.max(1, ...[...prompt.matchAll(/SCENE (\d+)/g)].map((m) => Number(m[1])));
+      scenes = Array.from({ length: n }, (_, i) => ({ sceneNumber: i + 1, title: `Scene ${i + 1}`, action: `mock visual beat ${i + 1}`, emotion: 'neutral' }));
+    }
     return {
       segments: scenes.map((s, i) => ({
         sceneNumbers: [i + 1],
@@ -123,7 +128,7 @@ const respond = (body) => {
       })),
       chapterSummary: 'Mock chapter summary covering all scenes.',
       continuitySummary: 'Mock continuity: the Hero met the Rival and the conflict began.',
-      characters: [{ name: 'Hero', aliases: [], description: 'Mock hero', pronunciation: 'Hero' }],
+      characters: [{ name: 'Hero', aliases: [], description: 'Mock hero', pronunciation: 'Hero' }, { name: 'Rival', aliases: [], description: 'Mock rival', pronunciation: 'Rival' }],
     };
   }
 
@@ -172,6 +177,11 @@ const server = http.createServer((req, res) => {
       return;
     }
     if (req.url === '/interactions') {
+      // Rate-limit emulation: any model id containing "limited" returns 429
+      if (/limited/i.test(String(body?.model || ''))) {
+        res.writeHead(429, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: 'Quota exceeded for model ' + body.model, status: 'RESOURCE_EXHAUSTED' } }));
+        return;
+      }
       // TTS: audio response modality
       if ((body?.generation_config?.response_modalities || []).includes('AUDIO')) {
         const wav = silenceWav();

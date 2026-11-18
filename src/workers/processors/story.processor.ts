@@ -5,12 +5,17 @@ import DetectedScene, { IDetectedSceneDocument } from 'models/detected-scene.mod
 import StorySegment from 'models/story-segment.model';
 import Character from 'models/character.model';
 import { registerJobHandler, NonRetryableError, JobContext } from 'libs/jobs/runner';
-import { getVisionProvider, recordUsage } from 'libs/ai/provider';
-import { countWords, rewriteInstruction, rewriteSchema, RewriteAction, storySchema, storySystem } from 'libs/ai/prompts';
+import { getVisionProvider, recordUsage, VisionImage } from 'libs/ai/provider';
+import { countWords, rewriteInstruction, rewriteSchema, RewriteAction, storySchema, storySystem, visualStorySystem } from 'libs/ai/prompts';
 import { getSettings } from 'libs/pricing/pricing.service';
 import { emitToUser } from 'libs/realtime/events';
 import { serializeChapter } from 'microservices/manga-service/manga.serializers';
 import { upsertCharacters } from './scene.processor';
+import ComicImage from 'models/comic-image.model';
+import { cropRegion } from 'libs/studio/panels';
+import { resolveLocal } from 'libs/studio/media';
+import { makeTempDir, removeDir } from 'libs/studio/paths';
+import { uploadFile } from 'libs/ai/gemini.client';
 
 export const wordsPerMinute = (settings: { wordsPerMinute?: Record<string, number> }, language: string) =>
   Number(settings.wordsPerMinute?.[language] || settings.wordsPerMinute?.default || 145);
@@ -43,27 +48,62 @@ const validCoverage = (segments: any[], sceneCount: number) => {
   return flat.length === sceneCount && flat.every((n: number, i: number) => n === i + 1) && segments.every((s) => s.sceneNumbers?.length && s.narration?.trim());
 };
 
+/** Crop every scene's regions; for Gemini, upload them to the Files API once — one vision call per chapter. */
+const sceneImages = async (ctx: JobContext, scenes: IDetectedSceneDocument[], tempDir: string, useFilesApi = true) => {
+  const docs = new Map((await ComicImage.find({ _id: { $in: scenes.flatMap((s) => s.regions.map((r) => r.image)) } })).map((i) => [String(i._id), i]));
+  const images: VisionImage[] = [];
+  for (let i = 0; i < scenes.length; i++) {
+    const parts = scenes[i].regions.slice(0, 3);
+    for (let k = 0; k < parts.length; k++) {
+      const img = docs.get(String(parts[k].image));
+      if (!img?.file) continue;
+      const local = await resolveLocal(img.file, tempDir);
+      images.push({
+        data: await cropRegion(local, parts[k].bbox),
+        mimeType: 'image/jpeg',
+        label: parts.length > 1 ? `SCENE ${i + 1} · PART ${k + 1}` : `SCENE ${i + 1}`,
+      });
+    }
+  }
+  if (!useFilesApi) return images;
+  const queue = images.map((img, i) => ({ img, label: img.label || `scene-${i}` }));
+  await Promise.all(
+    Array.from({ length: Math.min(6, queue.length) }, async () => {
+      while (queue.length) {
+        const item = queue.shift()!;
+        const f = await uploadFile(item.img.data, 'image/jpeg', item.label, ctx.signal);
+        if (f) item.img.uri = f.uri;
+      }
+    })
+  );
+  const uploaded = images.filter((i) => i.uri).length;
+  if (uploaded) await ctx.log(`Uploaded ${uploaded} scene image(s) to Gemini Files API`, 'info');
+  return images;
+};
+
 const generateChapter = async (
   ctx: JobContext,
   chapter: IMangaChapterDocument,
   scenes: IDetectedSceneDocument[],
-  opts: { language: string; mode: 'original' | 'recap'; continuity?: string; previousSummary?: string; projectId: Types.ObjectId; title: string }
+  opts: { language: string; mode: 'original' | 'recap'; continuity?: string; previousSummary?: string; projectId: Types.ObjectId; title: string; provider: 'local' | 'gemini' },
+  tempDir: string
 ) => {
-  const provider = getVisionProvider();
+  const provider = getVisionProvider(opts.provider);
+  const images = await sceneImages(ctx, scenes, tempDir, opts.provider === 'gemini');
   const base = [
     `Manga: ${opts.title}. Chapter ${chapter.number}${chapter.title ? ` — ${chapter.title}` : ''}.`,
+    `This chapter has ${scenes.length} scenes, shown as images labelled SCENE 1..${scenes.length}.`,
     `Known characters (JSON): ${JSON.stringify(await characterRegistry(opts.projectId))}`,
     opts.continuity ? `Story so far: ${opts.continuity}` : 'This is the beginning of the story.',
     opts.previousSummary ? `Previous chapter summary: ${opts.previousSummary}` : '',
-    `Scenes (JSON, chronological): ${JSON.stringify(scenes.map((s, i) => sceneForPrompt(s, i + 1)))}`,
   ]
     .filter(Boolean)
     .join('\n');
 
   let prompt = base;
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const r = await provider.generateJson<any>({ system: storySystem(opts.language, opts.mode), prompt, schema: storySchema, kind: 'text', signal: ctx.signal });
-    await recordUsage({ owner: ctx.job.owner, project: opts.projectId, job: ctx.job._id as any, provider: r.provider, model: r.model, kind: 'text', usage: r.usage });
+    const r = await provider.generateJson<any>({ system: visualStorySystem(opts.language, opts.mode), prompt, images, schema: storySchema, kind: 'vision', signal: ctx.signal });
+    await recordUsage({ owner: ctx.job.owner, project: opts.projectId, job: ctx.job._id as any, provider: r.provider, model: r.model, kind: 'vision', usage: r.usage });
     if (validCoverage(r.data?.segments || [], scenes.length)) return r.data;
     await ctx.log(`Chapter ${chapter.number}: narration did not cover scenes 1..${scenes.length} exactly once in order — asking the model to correct it`, 'warn');
     prompt = `${base}\n\nIMPORTANT: your previous answer skipped, repeated or reordered scene numbers. Every scene number 1..${scenes.length} must appear exactly once, in order, in contiguous groups, each with non-empty narration.`;
@@ -71,10 +111,12 @@ const generateChapter = async (
   throw new Error(`Chapter ${chapter.number}: the model could not produce narration covering every scene. Try again or edit scenes first.`);
 };
 
-const generateRange = async (ctx: JobContext<{ projectId: string; chapterIds: string[]; language: string; mode: 'original' | 'recap'; overwriteEdited?: boolean }>) => {
+export const generateRange = async (ctx: JobContext<{ projectId: string; chapterIds: string[]; language: string; mode: 'original' | 'recap'; overwriteEdited?: boolean; provider?: string }>) => {
   const project = await MangaProject.findById(ctx.payload.projectId);
   if (!project) throw new NonRetryableError('Project no longer exists');
-  const provider = getVisionProvider();
+  const settings = await getSettings(project.owner);
+  const aiProvider = (ctx.payload.provider || settings.aiProvider || 'gemini') as 'local' | 'gemini';
+  const provider = getVisionProvider(aiProvider);
   if (!provider.configured) throw new NonRetryableError(`AI provider "${provider.name}" is not configured (missing API key on the server).`, 'AI_NOT_CONFIGURED');
   const { language, mode } = ctx.payload;
   const chapters = (await MangaChapter.find({ _id: { $in: ctx.payload.chapterIds } })).sort(
@@ -90,7 +132,6 @@ const generateRange = async (ctx: JobContext<{ projectId: string; chapterIds: st
     throw new NonRetryableError(`${edited} narration segment(s) were edited by you. Confirm overwrite, or regenerate individual segments.`, 'EDIT_LOCK');
   }
 
-  const settings = await getSettings(project.owner);
   const wpm = wordsPerMinute(settings, language);
   let continuity = project.continuitySummary;
   // continuing from earlier chapters only makes sense if the summary stops before this range
@@ -100,7 +141,8 @@ const generateRange = async (ctx: JobContext<{ projectId: string; chapterIds: st
   }
   let previousSummary: string | undefined;
   let totalSegments = 0;
-
+  const tempDir = await makeTempDir('story');
+  try {
   for (let i = 0; i < chapters.length; i++) {
     ctx.throwIfCancelled();
     const chapter = chapters[i];
@@ -110,7 +152,7 @@ const generateRange = async (ctx: JobContext<{ projectId: string; chapterIds: st
     await emitToUser(chapter.owner, 'chapter:update', serializeChapter(chapter), chapter.project);
     try {
       const scenes = await DetectedScene.find({ chapter: chapter._id }).sort({ order: 1 });
-      const out = await generateChapter(ctx, chapter, scenes, { language, mode, continuity, previousSummary, projectId: project._id as Types.ObjectId, title: project.title });
+      const out = await generateChapter(ctx, chapter, scenes, { language, mode, continuity, previousSummary, projectId: project._id as Types.ObjectId, title: project.title, provider: aiProvider }, tempDir);
       ctx.throwIfCancelled();
 
       await StorySegment.deleteMany({ chapter: chapter._id, language, mode });
@@ -157,6 +199,9 @@ const generateRange = async (ctx: JobContext<{ projectId: string; chapterIds: st
       throw error;
     }
   }
+  } finally {
+    await removeDir(tempDir);
+  }
   return { chapters: chapters.length, segments: totalSegments };
 };
 
@@ -168,7 +213,8 @@ const rewriteSegment = async (ctx: JobContext<{ segmentId: string; action: Rewri
   if (action === 'regenerate' && seg.userEdited && !ctx.payload.force) {
     throw new NonRetryableError('This narration was edited by you — confirm to overwrite it', 'EDIT_LOCK');
   }
-  const provider = getVisionProvider();
+  const ownerSettings = await getSettings(seg.owner);
+  const provider = getVisionProvider(ownerSettings.aiProvider === 'local' ? 'local' : 'gemini');
   if (!provider.configured) throw new NonRetryableError(`AI provider "${provider.name}" is not configured (missing API key on the server).`, 'AI_NOT_CONFIGURED');
   const project = await MangaProject.findById(seg.project);
   const scenes = await DetectedScene.find({ _id: { $in: seg.scenes } }).sort({ order: 1 });
@@ -200,7 +246,6 @@ const rewriteSegment = async (ctx: JobContext<{ segmentId: string; action: Rewri
   const narration = String(r.data?.narration || '').trim();
   if (!narration) throw new Error('The model returned empty narration');
 
-  const settings = await getSettings(seg.owner);
   seg.history.push({ at: new Date(), source: 'ai', note: action, title: r.data.title, narration });
   seg.history = seg.history.slice(-40);
   const words = countWords(narration);
@@ -211,7 +256,7 @@ const rewriteSegment = async (ctx: JobContext<{ segmentId: string; action: Rewri
     tone: action === 'tone' ? ctx.payload.tone : seg.tone,
     language,
     wordCount: words,
-    estimatedDuration: estimateSeconds(words, wordsPerMinute(settings, language)),
+    estimatedDuration: estimateSeconds(words, wordsPerMinute(ownerSettings, language)),
     confidence: r.data.confidence,
     uncertainties: r.data.uncertainties || [],
     userEdited: action === 'regenerate' ? false : seg.userEdited,

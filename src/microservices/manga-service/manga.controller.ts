@@ -7,6 +7,8 @@ import { AppError } from 'middlewares/error';
 import MangaProject from 'models/manga-project.model';
 import MangaChapter from 'models/manga-chapter.model';
 import ComicImage from 'models/comic-image.model';
+import DetectedScene from 'models/detected-scene.model';
+import StorySegment from 'models/story-segment.model';
 import ChapterGroup from 'models/chapter-group.model';
 import UploadSession from 'models/upload-session.model';
 import ProcessingJob from 'models/processing-job.model';
@@ -28,6 +30,7 @@ import {
   getImage,
   getProject,
   getUploadSession,
+  mergeChaptersToPdfUnits,
   writeChunk,
 } from './manga.service';
 import { serializeChapter, serializeGroup, serializeImage, serializeProject, serializeUpload } from './manga.serializers';
@@ -193,6 +196,21 @@ export const removeChapter = asyncHandler(async (req, res) => {
   ok(res, { id: String(chapter._id) }, 200, 'Chapter deleted');
 });
 
+/** Merge ready chapters into ≤50MB PDF units — each becomes a special "merged" chapter. */
+export const mergeChapters = asyncHandler(async (req, res) => {
+  const project = await getProject(req, req.params.projectId);
+  const units = await mergeChaptersToPdfUnits(project, req.body || {});
+  ok(
+    res,
+    {
+      units: units.length,
+      chapters: units.map((u) => serializeChapter(u.chapter)),
+      exports: units.map((u) => ({ id: String(u.exportDoc._id), fileName: u.exportDoc.fileName, jobId: String(u.job._id) })),
+    },
+    202
+  );
+});
+
 export const reextractChapter = asyncHandler(async (req, res) => {
   const chapter = await getChapter(req, req.params.chapterId);
   if (!chapter.archive) throw new AppError('Chapter has no archive', 400);
@@ -275,6 +293,61 @@ export const restoreImage = asyncHandler(async (req, res) => {
     target: { kind: 'image', id: image._id as Types.ObjectId },
   });
   ok(res, serializeJob(job), 202);
+});
+
+/**
+ * Delete a single page. Scenes lose the region; scenes left empty are removed
+ * (segments are updated the same way deleteScene does). File docs shared with
+ * merged-unit images are kept; unshared ones are deleted.
+ */
+export const removeImage = asyncHandler(async (req, res) => {
+  const image = await getImage(req, req.params.imageId);
+  const active = await ProcessingJob.countDocuments({
+    'target.id': { $in: [image._id, image.chapter] },
+    status: { $in: ['queued', 'active', 'retrying'] },
+  });
+  if (active) throw new AppError('This page (or its chapter) has a running job — cancel it first', 409);
+
+  const scenes = await DetectedScene.find({ 'regions.image': image._id });
+  for (const scene of scenes) {
+    scene.regions = scene.regions.filter((r) => String(r.image) !== String(image._id)) as typeof scene.regions;
+    if (scene.regions.length) {
+      await scene.save();
+      continue;
+    }
+    const segs = await StorySegment.find({ scenes: scene._id });
+    for (const seg of segs) {
+      seg.scenes = seg.scenes.filter((id) => String(id) !== String(scene._id));
+      if (seg.scenes.length) await seg.save();
+      else await seg.deleteOne();
+    }
+    await deleteFileById(scene.thumbnail);
+    await scene.deleteOne();
+  }
+
+  const fileIds = [image.thumbnail, image.file, image.originalFile].filter(
+    (f, i, arr) => f && arr.findIndex((x) => String(x) === String(f)) === i
+  );
+  for (const f of fileIds) {
+    const shared = await ComicImage.exists({
+      _id: { $ne: image._id },
+      $or: [{ file: f }, { originalFile: f }, { thumbnail: f }],
+    });
+    if (!shared) await deleteFileById(f);
+  }
+
+  const chapterId = image.chapter;
+  const removedIndex = image.index;
+  await image.deleteOne();
+  await ComicImage.updateMany({ chapter: chapterId, index: { $gt: removedIndex } }, { $inc: { index: -1 } });
+  const chapter = await MangaChapter.findById(chapterId);
+  if (chapter) {
+    chapter.imageCount = await ComicImage.countDocuments({ chapter: chapterId });
+    chapter.brokenImageCount = await ComicImage.countDocuments({ chapter: chapterId, status: 'broken' });
+    await chapter.save();
+    await emitChapter(chapter);
+  }
+  ok(res, { id: String(image._id) }, 200, 'Page deleted');
 });
 
 export const refreshBrokenCount = async (chapterId: Types.ObjectId) => {

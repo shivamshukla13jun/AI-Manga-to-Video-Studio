@@ -96,10 +96,10 @@ router.get(
   asyncHandler(async (req, res) => {
     const filter: Record<string, unknown> = { ...ownerFilter(req) };
     if (req.query.project) filter.project = assertObjectId(req.query.project, 'project id');
-    const exports = await PdfExport.find(filter).sort({ createdAt: -1 }).limit(100);
-    const jobs = await ProcessingJob.find({ _id: { $in: exports.map((e) => e.job).filter(Boolean) } });
+    const pdfExports = await PdfExport.find(filter).sort({ createdAt: -1 }).limit(100);
+    const jobs = await ProcessingJob.find({ _id: { $in: pdfExports.map((e) => e.job).filter(Boolean) } });
     const jobById = new Map(jobs.map((j) => [String(j._id), j]));
-    ok(res, exports.map((e) => serialize(e, e.job ? jobById.get(String(e.job)) : undefined)));
+    ok(res, pdfExports.map((e) => serialize(e, e.job ? jobById.get(String(e.job)) : undefined)));
   })
 );
 

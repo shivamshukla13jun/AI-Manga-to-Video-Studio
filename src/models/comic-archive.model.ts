@@ -1,11 +1,11 @@
 import mongoose, { Document, Schema, Types } from 'mongoose';
 
-/** The original uploaded CBZ — preserved untouched for re-extraction. */
+/** Metadata of the uploaded CBZ. The archive bytes are deleted after extraction. */
 export interface IComicArchiveDocument extends Document {
   owner: Types.ObjectId;
   project: Types.ObjectId;
   chapter?: Types.ObjectId;
-  file: Types.ObjectId;
+  file?: Types.ObjectId;
   originalName: string;
   size: number;
   sha256: string;
@@ -24,7 +24,7 @@ const archiveSchema = new Schema<IComicArchiveDocument>(
     owner: { type: Schema.Types.ObjectId, ref: 'User', required: true },
     project: { type: Schema.Types.ObjectId, ref: 'MangaProject', required: true },
     chapter: { type: Schema.Types.ObjectId, ref: 'MangaChapter' },
-    file: { type: Schema.Types.ObjectId, ref: 'File', required: true },
+    file: { type: Schema.Types.ObjectId, ref: 'File' },
     originalName: { type: String, required: true },
     size: { type: Number, required: true },
     sha256: { type: String, required: true },

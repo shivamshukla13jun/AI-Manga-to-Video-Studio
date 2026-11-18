@@ -85,7 +85,8 @@ export interface InteractionUsage {
 }
 
 export interface InteractionRequest {
-  model: string;
+  /** Ordered fallback chain — first model is tried, then the next on 429/quota errors */
+  model: string | string[];
   input: InteractionContent[] | string;
   systemInstruction?: string;
   /** JSON schema → structured output (response_format application/json) */
@@ -103,6 +104,8 @@ export interface InteractionResult {
   json?: any;
   audio?: { data: string; mimeType?: string };
   usage: InteractionUsage;
+  /** the model that actually produced this response (from the fallback chain) */
+  model: string;
   raw: any;
 }
 
@@ -111,6 +114,22 @@ export class GeminiError extends Error {
     super(message);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Model fallback chain: models that hit a rate limit (429) or quota error are
+// cooled down per-process so later calls skip them instead of retrying a dead
+// model on every request. Cooldown expires after RATE_LIMIT_COOLDOWN_MS.
+// ---------------------------------------------------------------------------
+const RATE_LIMIT_COOLDOWN_MS = 60_000;
+const modelCooldowns = new Map<string, number>();
+
+const isQuotaError = (e: unknown): e is GeminiError =>
+  e instanceof GeminiError && (e.status === 429 || /quota|rate.?limit|resource.?exhausted/i.test(e.message));
+
+const cooledModels = (chain: string[]) => {
+  const now = Date.now();
+  return chain.filter((m) => (modelCooldowns.get(m) || 0) <= now);
+};
 
 export const geminiConfigured = () => !!config.GEMINI_API_KEY;
 
@@ -196,9 +215,9 @@ const collectOutput = (raw: any) => {
   return { text, audio };
 };
 
-export const createInteraction = async (req: InteractionRequest): Promise<InteractionResult> => {
+const runInteraction = async (model: string, req: InteractionRequest): Promise<InteractionResult> => {
   const body: Record<string, unknown> = {
-    model: req.model,
+    model,
     input: req.input,
     store: false,
     ...(req.systemInstruction ? { system_instruction: req.systemInstruction } : {}),
@@ -223,7 +242,27 @@ export const createInteraction = async (req: InteractionRequest): Promise<Intera
       throw new GeminiError(`Gemini returned invalid JSON${raw?.status === 'incomplete' ? ' (output truncated)' : ''}`, 200, true);
     }
   }
-  return { id: raw?.id, text, json, audio, usage: parseUsage(raw?.usage), raw };
+  return { id: raw?.id, text, json, audio, usage: parseUsage(raw?.usage), model, raw };
+};
+
+export const createInteraction = async (req: InteractionRequest): Promise<InteractionResult> => {
+  const chain = Array.isArray(req.model) ? req.model : [req.model];
+  const candidates = cooledModels(chain);
+  if (!candidates.length) {
+    throw new GeminiError(`All Gemini models in the fallback chain are rate-limited (${chain.join(', ')}). Wait a minute and retry.`, 429, true);
+  }
+  let lastErr: unknown;
+  for (const model of candidates) {
+    try {
+      return await runInteraction(model, req);
+    } catch (e) {
+      if (!isQuotaError(e)) throw e;
+      modelCooldowns.set(model, Date.now() + RATE_LIMIT_COOLDOWN_MS);
+      console.warn(`[gemini] model ${model} rate-limited — cooling down 60s${candidates.indexOf(model) < candidates.length - 1 ? ', trying next model' : ''}`);
+      lastErr = e;
+    }
+  }
+  throw lastErr;
 };
 
 /** Token count for budgeting (legacy countTokens endpoint, still supported). */

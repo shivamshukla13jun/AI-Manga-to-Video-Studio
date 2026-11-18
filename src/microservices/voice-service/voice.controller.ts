@@ -233,6 +233,7 @@ export const getStudioSettings = asyncHandler(async (req, res) => {
     pricingTier: s.pricingTier,
     defaultTtsProvider: s.defaultTtsProvider,
     defaultVoiceProfile: s.defaultVoiceProfile ? String(s.defaultVoiceProfile) : undefined,
+    aiProvider: s.aiProvider,
     narrationLanguage: s.narrationLanguage,
     narrationMode: s.narrationMode,
     wordsPerMinute: s.wordsPerMinute,
@@ -241,7 +242,7 @@ export const getStudioSettings = asyncHandler(async (req, res) => {
 
 export const updateStudioSettings = asyncHandler(async (req, res) => {
   const update: Record<string, unknown> = {};
-  for (const k of ['budgetLimitUSD', 'confirmAboveUSD', 'displayCurrency', 'pricingTier', 'defaultTtsProvider', 'defaultVoiceProfile', 'narrationLanguage', 'narrationMode', 'wordsPerMinute']) {
+  for (const k of ['budgetLimitUSD', 'confirmAboveUSD', 'displayCurrency', 'pricingTier', 'defaultTtsProvider', 'defaultVoiceProfile', 'aiProvider', 'narrationLanguage', 'narrationMode', 'wordsPerMinute']) {
     if (req.body[k] !== undefined) update[k] = req.body[k];
   }
   const s = await StudioSettings.findOneAndUpdate({ owner: req.user!._id }, { $set: update }, { new: true, upsert: true });

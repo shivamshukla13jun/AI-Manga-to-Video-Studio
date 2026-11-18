@@ -23,6 +23,8 @@ let segments = [];
 
 test.before(async () => {
   token = await login();
+  // Detection tests run the free local CV path; the story tests flip to Gemini below.
+  await api(token, 'PUT', '/api/voice/settings', { aiProvider: 'local' });
   const r = await api(token, 'POST', '/api/manga/projects', { title: `AI Pipeline ${Date.now()}`, language: 'ko', narrationLanguage: 'hi' });
   assert.equal(r.status, 201, JSON.stringify(r.body));
   project = r.body.data;
@@ -41,16 +43,8 @@ test('project overview reports un-analysed chapter', async () => {
   assert.equal(r.body.data.aiConfigured, true, 'GEMINI_API_KEY should be set for this test run');
 });
 
-test('scene detection requires an approved estimate and returns a job', async () => {
-  const est = await api(token, 'POST', '/api/story/estimate/scenes', { projectId: project.id, chapterIds: [chapter.id] });
-  assert.equal(est.status, 201, JSON.stringify(est.body));
-  assert.ok(est.body.data.totals.costUSD >= 0);
-  assert.ok((est.body.data.items?.[0]?.meta?.pages || 0) >= 3);
-
-  const noEst = await api(token, 'POST', '/api/story/detect', { projectId: project.id, chapterIds: [chapter.id] });
-  assert.equal(noEst.status, 428, 'estimate required before paid call');
-
-  const r = await api(token, 'POST', '/api/story/detect', { projectId: project.id, chapterIds: [chapter.id], estimateId: est.body.data.id });
+test('scene detection is local CV — free, no estimate — and returns a job', async () => {
+  const r = await api(token, 'POST', '/api/story/detect', { projectId: project.id, chapterIds: [chapter.id] });
   assert.equal(r.status, 202, JSON.stringify(r.body));
   const job = await waitForJob(token, r.body.data[0].id);
   assert.equal(job.status, 'completed', JSON.stringify(job.error));
@@ -68,12 +62,12 @@ test('detected scenes have source image references and ordered regions', async (
   scenes = fresh.body.data;
 });
 
-test('detection writes narration in the same job and scenes stay text-free', async () => {
+test('detection produces visual-only scenes; narration is a separate AI step', async () => {
   const seg = await api(token, 'GET', `/api/story/projects/${project.id}/segments?language=hi&mode=recap`);
   assert.equal(seg.status, 200);
-  assert.ok(seg.body.data.length >= scenes.length, 'narration produced during scene detection, no separate job needed');
-  assert.ok(seg.body.data.every((s) => s.narration.trim().length > 0 && s.wordCount > 0));
+  assert.equal(seg.body.data.length, 0, 'no narration before story generation');
   assert.ok(scenes.every((s) => (s.dialogues || []).length === 0), 'scenes carry no OCR text');
+  assert.ok(scenes.every((s) => s.source === 'cv'), 'scenes come from the local CV detector');
   // narration language/mode come from global studio settings, not per-project
   const set = await api(token, 'PUT', '/api/voice/settings', { narrationMode: 'original' });
   assert.equal(set.status, 200);
@@ -83,6 +77,8 @@ test('detection writes narration in the same job and scenes stay text-free', asy
 });
 
 test('story generation covers every scene with narration', async () => {
+  const prov = await api(token, 'PUT', '/api/voice/settings', { aiProvider: 'gemini' });
+  assert.equal(prov.status, 200, JSON.stringify(prov.body));
   const est = await api(token, 'POST', '/api/story/estimate/story', { projectId: project.id, chapterIds: [chapter.id], language: 'hi', mode: 'recap' });
   assert.equal(est.status, 201);
   const r = await api(token, 'POST', '/api/story/generate', { projectId: project.id, chapterIds: [chapter.id], language: 'hi', mode: 'recap', estimateId: est.body.data.id });
@@ -128,19 +124,19 @@ test('narration edit sets userEdited; regeneration without force is refused', as
 test('scene split -> merge -> reorder -> delete keep order contiguous', async () => {
   const list = async () => (await api(token, 'GET', `/api/story/chapters/${chapter.id}/scenes`)).body.data;
   let cur = await list();
-  const target = cur[0];
-  const splitAt = Math.ceil(target.regions.length / 2);
-  const split = await api(token, 'POST', `/api/story/scenes/${target.id}/split`, { regionIndex: splitAt });
-  assert.equal(split.status, 200, JSON.stringify(split.body));
-  cur = await list();
-  assert.equal(cur.length, scenes.length + 1);
-  assert.equal(cur[0].regions.length + cur[1].regions.length, target.regions.length);
-
+  // CV scenes have one region each — merge two first, then split the merged scene back.
   const merged = await api(token, 'POST', '/api/story/scenes/merge', { ids: [cur[0].id, cur[1].id] });
   assert.equal(merged.status, 200, JSON.stringify(merged.body));
   cur = await list();
-  assert.equal(cur.length, scenes.length);
+  assert.equal(cur.length, scenes.length - 1);
   assert.equal(cur[0].userEdited, true);
+
+  const target = cur[0];
+  const split = await api(token, 'POST', `/api/story/scenes/${target.id}/split`, { regionIndex: Math.ceil(target.regions.length / 2) });
+  assert.equal(split.status, 200, JSON.stringify(split.body));
+  cur = await list();
+  assert.equal(cur.length, scenes.length);
+  assert.equal(cur[0].regions.length + cur[1].regions.length, target.regions.length);
 
   const reorderedIds = [...cur.map((s) => s.id)].reverse();
   const re = await api(token, 'PUT', `/api/story/chapters/${chapter.id}/scenes/reorder`, { ids: reorderedIds });
@@ -161,5 +157,5 @@ test('scene split -> merge -> reorder -> delete keep order contiguous', async ()
 test('usage records link back to the approved estimate', async () => {
   const est = await api(token, 'GET', `/api/story/projects/${project.id}/estimates`);
   assert.equal(est.status, 200);
-  assert.ok(est.body.data.length >= 2, 'approved estimates listed');
+  assert.ok(est.body.data.length >= 1, 'approved estimates listed');
 });

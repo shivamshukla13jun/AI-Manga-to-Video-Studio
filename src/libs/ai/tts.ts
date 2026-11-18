@@ -70,6 +70,10 @@ export const GEMINI_PREBUILT_VOICES: { id: string; name: string; description: st
 
 const ttsUsage = (u: InteractionUsage): InteractionUsage => u;
 
+/** Ordered TTS fallback chain: flash-tts → lite-tts (or GEMINI_TTS_MODELS). */
+const ttsModels = (): string[] =>
+  (config.GEMINI_TTS_MODELS as string).split(',').map((m) => m.trim()).filter(Boolean);
+
 class GeminiTts implements TtsProvider {
   readonly name = 'gemini' as const;
   get configured() {
@@ -92,7 +96,7 @@ class GeminiTts implements TtsProvider {
     // NOTE: verify the exact speech_config field names against the live API
     // when a key is available — the mock server tolerates the whole payload.
     const r = await createInteraction({
-      model: config.GEMINI_TTS_MODEL as string,
+      model: ttsModels(),
       input: [{ type: 'text', text: req.text }],
       generationConfig: {
         response_modalities: ['AUDIO'],
@@ -105,7 +109,7 @@ class GeminiTts implements TtsProvider {
       signal: req.signal,
     });
     if (!r.audio?.data) throw new Error('Gemini TTS returned no audio');
-    return { audio: Buffer.from(r.audio.data, 'base64'), mimeType: r.audio.mimeType || 'audio/wav', usage: ttsUsage(r.usage), model: config.GEMINI_TTS_MODEL as string, provider: 'gemini' };
+    return { audio: Buffer.from(r.audio.data, 'base64'), mimeType: r.audio.mimeType || 'audio/wav', usage: ttsUsage(r.usage), model: r.model, provider: 'gemini' };
   }
   async replicateVoice(req: { name: string; referenceWav: Buffer; consentWav: Buffer; language: string; signal?: AbortSignal }): Promise<{ voiceId: string }> {
     // Voice replication on Gemini requires the account to have the feature

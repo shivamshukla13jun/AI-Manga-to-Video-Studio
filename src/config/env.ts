@@ -184,6 +184,11 @@ const config = {
   GEMINI_API_REVISION: env("GEMINI_API_REVISION", "2026-05-20"),
   GEMINI_VISION_MODEL: env("GEMINI_VISION_MODEL", "gemini-3.8-flash"),
   GEMINI_STORY_MODEL: env("GEMINI_STORY_MODEL", "gemini-3.8-flash"),
+  // Ordered fallback chains (comma-separated, best → cheapest). When a model
+  // returns 429/404 it is cooled down and the next model in the chain is tried.
+  GEMINI_VISION_MODELS: env("GEMINI_VISION_MODELS", env("GEMINI_VISION_MODEL", "gemini-3.8-flash")),
+  GEMINI_STORY_MODELS: env("GEMINI_STORY_MODELS", env("GEMINI_STORY_MODEL", "gemini-3.8-flash")),
+  GEMINI_TTS_MODELS: env("GEMINI_TTS_MODELS", `${env("GEMINI_TTS_MODEL", "gemini-3.8-flash-tts")},${env("GEMINI_TTS_LITE_MODEL", "gemini-3.8-flash-lite-tts")}`),
   GEMINI_THINKING_LEVEL: env("GEMINI_THINKING_LEVEL", "high"),
   GEMINI_TTS_MODEL: env("GEMINI_TTS_MODEL", "gemini-3.8-flash-tts"),
   GEMINI_TTS_LITE_MODEL: env("GEMINI_TTS_LITE_MODEL", "gemini-3.8-flash-lite-tts"),
@@ -193,8 +198,10 @@ const config = {
   AI_TILE_HEIGHT: Number(env("AI_TILE_HEIGHT", "2400")),
   AI_TILE_OVERLAP: Number(env("AI_TILE_OVERLAP", "300")),
 
-  // Optional local TTS inference service (ai-service/)
+  // Optional local inference service (ai-service/) — TTS, panel CV and local VLM story generation
   LOCAL_TTS_URL: env("LOCAL_TTS_URL", "http://127.0.0.1:8001"),
+  PANEL_DETECT_URL: env("PANEL_DETECT_URL", env("LOCAL_TTS_URL", "http://127.0.0.1:8001")),
+  LOCAL_STORY_MODEL: env("LOCAL_STORY_MODEL", "microsoft/Phi-3.5-vision-instruct-onnx"),
 
   // Media tooling
   FFMPEG_PATH: env("FFMPEG_PATH", "ffmpeg"),

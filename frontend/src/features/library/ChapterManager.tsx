@@ -97,6 +97,7 @@ const Row = ({ c, onView, onDelete }: { c: Chapter; onView: (c: Chapter) => void
         ) : (
           <div className="flex items-center gap-1.5">
             <Badge tone={STATUS_TONE[c.status]}>{c.status}</Badge>
+            {c.kind === 'merged' && <Badge tone="accent">PDF unit</Badge>}
             {c.brokenImageCount > 0 && (
               <Tooltip content={`${c.brokenImageCount} broken page(s) — open pages to fix`}>
                 <span>

@@ -58,6 +58,11 @@ export interface Chapter {
   error?: string;
   analysisStatus: 'none' | 'processing' | 'done' | 'failed';
   storyStatus: 'none' | 'processing' | 'done' | 'failed';
+  kind?: 'chapter' | 'merged';
+  sourceChapters?: string[];
+  pdfExport?: string;
+  /** Leading archive pages skipped at extraction (cover pages) */
+  skipPages?: number;
   summary?: string;
   extractedAt?: string;
   createdAt: string;
@@ -229,12 +234,16 @@ export interface CostEstimate {
 export interface StoryOverview {
   project: { id: string; title: string; narrationLanguage: string; narrationMode: 'original' | 'recap'; continuitySummary?: string; continuityThrough?: number };
   aiConfigured: boolean;
+  aiProvider?: 'gemini' | 'local';
   language: string;
   mode: string;
   chapters: {
     id: string;
     number: number;
     title?: string;
+    kind?: 'chapter' | 'merged';
+    sourceChapters?: string[];
+    pdf?: { id: string; fileName: string; status: string; pageCount?: number; size?: number; url?: string };
     status: string;
     imageCount: number;
     brokenImageCount: number;
@@ -317,6 +326,7 @@ export interface StudioSettings {
   usdToInrUpdatedAt?: string;
   usdToInrSource?: string;
   pricingTier: 'standard' | 'batch';
+  aiProvider: 'gemini' | 'local';
   defaultTtsProvider: 'local' | 'gemini';
   defaultVoiceProfile?: string;
   narrationLanguage: string;

@@ -15,6 +15,8 @@ export interface IStudioSettingsDocument extends Document {
   defaultTtsProvider: 'local' | 'gemini';
   defaultVoiceProfile?: Types.ObjectId;
   /** Speaking-rate defaults (words per minute) used for duration estimates */
+  /** AI engine for scene detection + story generation: cloud Gemini or local Python service */
+  aiProvider: 'gemini' | 'local';
   /** Global narration language for ALL story generation (not per-project) */
   narrationLanguage: string;
   /** Global narration style for ALL story generation */
@@ -36,6 +38,7 @@ const settingsSchema = new Schema<IStudioSettingsDocument>(
     pricingTier: { type: String, enum: ['standard', 'batch'], default: 'standard' },
     defaultTtsProvider: { type: String, enum: ['local', 'gemini'], default: 'local' },
     defaultVoiceProfile: { type: Schema.Types.ObjectId, ref: 'VoiceProfile' },
+    aiProvider: { type: String, enum: ['gemini', 'local'], default: 'gemini' },
     narrationLanguage: { type: String, default: 'hi' },
     narrationMode: { type: String, enum: ['original', 'recap'], default: 'recap' },
     // conversational narration rates; editable per user after calibration

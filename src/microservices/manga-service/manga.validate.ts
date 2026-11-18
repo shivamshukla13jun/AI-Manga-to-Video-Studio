@@ -27,6 +27,10 @@ export const uploadCreateSchema = z.object({
   chapterNumber: chapterNumber.optional(),
   chapterTitle: z.string().max(200).optional(),
   replaceChapterId: objectId.optional(),
+  /** Leading pages to drop at extraction (e.g. 1 = skip the cover page) */
+  skipPages: z.coerce.number().int().min(0).max(500).optional(),
+  /** After extraction, merge this chapter into a ≤50MB PDF unit */
+  autoMerge: z.boolean().optional(),
 });
 
 export const uploadCompleteSchema = z.object({
@@ -56,3 +60,11 @@ export const groupSchema = z
     chapterIds: z.array(objectId).optional(),
   })
   .refine((g) => g.endNumber >= g.startNumber, { message: 'End chapter must be ≥ start chapter', path: ['endNumber'] });
+
+export const mergeSchema = z
+  .object({
+    chapterIds: z.array(objectId).min(1).max(500).optional(),
+    maxSizeMB: z.coerce.number().min(1).max(50).optional(),
+  })
+  .optional()
+  .default({});

@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Badge, type BadgeTone, Progress } from '@/components/ui/primitives';
 import { Dialog, DialogContent, DialogFooter } from '@/components/ui/primitives';
 import { cn } from '@/lib/utils';
+import { jobActions, useAction } from '@/lib/queries';
 import type { Job } from '@/lib/types';
 
 export const Spinner = ({ className }: { className?: string }) => <Loader2 className={cn('size-4 animate-spin text-muted', className)} />;
@@ -74,6 +75,28 @@ export const JobInline = ({ job, className }: { job: Job; className?: string }) 
     <Progress value={job.progress} tone={job.status === 'failed' ? 'danger' : job.status === 'retrying' ? 'warn' : 'accent'} />
   </div>
 );
+
+/** Banner listing failed jobs with the thrown error and a click-to-retry button. */
+export const JobErrorBanner = ({ jobs }: { jobs: Job[] }) => {
+  const retry = useAction((id: string) => jobActions.retry(id), { success: 'Retry queued', invalidate: [['jobs']] });
+  if (!jobs.length) return null;
+  return (
+    <div className="border-b border-danger/30 bg-danger/10 px-4 py-1.5 text-xs">
+      {jobs.map((j) => (
+        <div key={j.id} className="flex items-center gap-2 py-0.5">
+          <AlertTriangle className="size-3.5 shrink-0 text-danger" />
+          <span className="min-w-0 flex-1 truncate text-danger">
+            {j.title} failed{j.error?.message ? `: ${j.error.message}` : ''}
+            {j.runCount > 1 ? ` (attempt ${j.attempts || j.runCount})` : ''}
+          </span>
+          <Button size="xs" variant="outline" loading={retry.isPending} onClick={() => retry.mutate(j.id)}>
+            <RotateCw /> Retry
+          </Button>
+        </div>
+      ))}
+    </div>
+  );
+};
 
 export const ConfirmDialog = ({
   open,

@@ -1,13 +1,14 @@
 import { useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { BookOpen, ScanSearch, Sparkles, TriangleAlert } from 'lucide-react';
+import { BookOpen, Clapperboard, FileText, ScanSearch, Sparkles, TriangleAlert } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { NativeSelect } from '@/components/ui/input';
 import { Badge, Checkbox, Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/primitives';
-import { EmptyState, JobStatusBadge, LoadingState, PageHeader } from '@/components/common/states';
-import { storyApi, useAction, useJobs, useProjects, useStoryOverview, useStudioSettings } from '@/lib/queries';
+import { EmptyState, JobErrorBanner, JobStatusBadge, LoadingState, PageHeader } from '@/components/common/states';
+import { mangaApi, storyApi, useAction, useJobs, useProjects, useStoryOverview, useStudioSettings, useVideos, videoApi } from '@/lib/queries';
 import { useProjectRoom } from '@/lib/socket';
 import { formatDuration } from '@/lib/utils';
-import type { Chapter, CostEstimate } from '@/lib/types';
+import type { Chapter, CostEstimate, Job } from '@/lib/types';
 import { EstimateDialog } from './EstimateDialog';
 import { SceneEditor } from './SceneEditor';
 import { NarrationEditor } from './NarrationEditor';
@@ -57,33 +58,54 @@ const Studio = ({ projectId }: { projectId: string }) => {
   const language = studioSettings.data?.narrationLanguage || 'hi';
   const mode = studioSettings.data?.narrationMode || 'recap';
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [estimate, setEstimate] = useState<{ est: CostEstimate; kind: 'detect' | 'generate' } | null>(null);
+  const [estimate, setEstimate] = useState<CostEstimate | null>(null);
+  const [runMode, setRunMode] = useState<'queue' | 'direct'>('queue');
+  const [, setEstimateAction] = useState<'detect' | 'story'>('story');
   const navigate = useNavigate();
 
   useProjectRoom(projectId);
   const overview = useStoryOverview(projectId, language, mode);
   const aiJobs = useJobs({ project: projectId });
   const running = (aiJobs.data || []).filter((j) => ['scene-detection', 'story-generation'].includes(j.type) && ['queued', 'active', 'retrying'].includes(j.status));
+  // latest failed job per AI type (jobs arrive newest-first)
+  const failed = ['scene-detection', 'story-generation']
+    .map((t) => (aiJobs.data || []).find((j) => j.type === t && j.status === 'failed'))
+    .filter(Boolean) as Job[];
 
   const chapters = overview.data?.chapters || [];
+  const aiProvider = (overview.data?.aiProvider || studioSettings.data?.aiProvider || 'gemini') as 'gemini' | 'local';
+  const mergedUnits = chapters.filter((c: any) => c.kind === 'merged');
   const readyChapters = chapters.filter((c) => c.status === 'ready');
-  const chosenIds = selected.size ? [...selected] : readyChapters.map((c) => c.id);
+  const readyMerged = mergedUnits.filter((c) => c.status === 'ready');
+  const readySources = readyChapters.filter((c: any) => c.kind !== 'merged');
+  const chosenIds = selected.size ? [...selected] : (readyMerged.length ? readyMerged : readyChapters).map((c) => c.id);
   const chosenSet = new Set(chosenIds);
   const hasScenes = chapters.some((c: any) => c.scenes > 0 && chosenSet.has(c.id));
-  const chapter: Chapter | undefined = (chapters.find((c) => c.id === chapterId) || chapters[0]) as any;
+  const chapter: Chapter | undefined = (chapters.find((c) => c.id === chapterId) || mergedUnits[0] || chapters[0]) as any;
+
+  // Detection always runs on the Python CV service — free, no estimate needed.
+  const runDetect = useAction(async () => storyApi.detect(projectId, chosenIds, {}), {
+    success: 'Scene detection queued — watch progress in Render Manager',
+    onSuccess: () => { setEstimate(null); overview.refetch(); aiJobs.refetch(); },
+  });
+  const detectClick = () => runDetect.mutate();
 
   const estimateMut = useAction(
-    async (v: { kind: 'detect' | 'generate' }) => {
-      const est = v.kind === 'detect' ? await storyApi.estimateScenes(projectId, chosenIds) : await storyApi.estimateStory(projectId, chosenIds, language, mode);
-      setEstimate({ est, kind: v.kind });
-    },
+    async () => { setEstimateAction('story'); setEstimate(await storyApi.estimateStory(projectId, chosenIds, language, mode)); },
     {}
   );
+  const runGenerate = useAction(
+    async (estimateId?: string) => storyApi.generate(projectId, chosenIds, language, mode, estimateId, { direct: runMode === 'direct' }),
+    {
+      success: (r: any) => (r?.result ? `Narration written — ${r.result.segments} segments` : 'Story generation queued — watch progress in Render Manager'),
+      onSuccess: () => { setEstimate(null); overview.refetch(); aiJobs.refetch(); },
+    }
+  );
+  const generateClick = () => (aiProvider === 'local' ? runGenerate.mutate() : estimateMut.mutate());
   const runJob = useAction(
     async () => {
       if (!estimate) return;
-      if (estimate.kind === 'detect') await storyApi.detect(projectId, chosenIds, estimate.est.id);
-      else await storyApi.generate(projectId, chosenIds, language, mode, estimate.est.id);
+      await storyApi.generate(projectId, chosenIds, language, mode, estimate.id, { direct: runMode === 'direct' });
     },
     {
       success: 'Job queued — watch progress in Render Manager',
@@ -93,6 +115,33 @@ const Studio = ({ projectId }: { projectId: string }) => {
         aiJobs.refetch();
       },
     }
+  );
+
+  // Merge selected (or all ready) source chapters into ≤50MB PDF special-chapter units.
+  const mergeMut = useAction(
+    async () =>
+      mangaApi.merge(projectId, { chapterIds: selected.size ? [...selected].filter((id) => readySources.some((c) => c.id === id)) : undefined }),
+    {
+      success: 'Merging into ≤50MB PDF units — each becomes a selectable special chapter',
+      onSuccess: () => { setSelected(new Set()); overview.refetch(); aiJobs.refetch(); },
+    }
+  );
+
+  // Send a chapter's scenes+narration to Video Studio: reuse the latest video
+  // project for this manga project if one exists, else build a fresh timeline.
+  const videos = useVideos(projectId);
+  const openVideo = useAction(
+    async (chapterIds: string[]) => {
+      const existing = videos.data?.[0];
+      if (existing) {
+        if (chapterIds.length) await videoApi.rebuild(existing.id, chapterIds).catch(() => undefined);
+        navigate(`/video/${existing.id}`);
+        return;
+      }
+      const v = await videoApi.create({ mangaProjectId: projectId, name: overview.data?.project.title || 'Video', language, mode, chapterIds });
+      navigate(`/video/${v.id}`);
+    },
+    {}
   );
 
   const toggleChapter = (id: string) =>
@@ -114,22 +163,55 @@ const Studio = ({ projectId }: { projectId: string }) => {
           <p className="text-[11px] text-muted">AI Story Studio</p>
         </div>
         <span className="flex-1" />
-        <Link to="/settings" title="Global narration settings">
-          <Badge tone="neutral" className="cursor-pointer">{LANGUAGES.find(([v]) => v === language)?.[1] || language} · {mode === 'recap' ? 'Recap' : 'Original'}</Badge>
+        <Link to="/settings" title="Global narration + AI provider settings">
+          <Badge tone="neutral" className="cursor-pointer">{LANGUAGES.find(([v]) => v === language)?.[1] || language} · {mode === 'recap' ? 'Recap' : 'Original'} · {aiProvider === 'local' ? 'Local AI' : 'Gemini'}</Badge>
         </Link>
-        {hasScenes && (
-          <Button size="sm" variant="outline" disabled={!ov.aiConfigured || !readyChapters.length || estimateMut.isPending} onClick={() => estimateMut.mutate({ kind: 'generate' })} title="Re-narrate existing scenes (e.g. after changing narration style or editing scenes)">
-            <Sparkles /> Rewrite story
-          </Button>
-        )}
-        <Button size="sm" variant="primary" disabled={!ov.aiConfigured || !readyChapters.length || estimateMut.isPending} onClick={() => estimateMut.mutate({ kind: 'detect' })} title="Detect scenes and generate narration in one step">
-          <ScanSearch /> Detect + narrate
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={!readySources.length || mergeMut.isPending}
+          onClick={() => mergeMut.mutate()}
+          title="Batch ready chapters into ≤50MB PDFs — each becomes a special merged chapter for detection + story"
+        >
+          <FileText /> {mergeMut.isPending ? 'Merging…' : 'Merge to PDF'}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={!readyChapters.length || runDetect.isPending}
+          onClick={detectClick}
+          title="Python CV panel detection — free, no AI calls"
+        >
+          <ScanSearch /> Detect scenes
+        </Button>
+        <NativeSelect
+          value={runMode}
+          onChange={(e) => setRunMode(e.target.value as 'queue' | 'direct')}
+          className="h-8 w-44 text-xs"
+          title="Background = queued job you can leave running. Direct = waits for the result here — errors show immediately."
+        >
+          <option value="queue">Run in background</option>
+          <option value="direct">Run direct (see errors)</option>
+        </NativeSelect>
+        <Button
+          size="sm"
+          variant="primary"
+          disabled={!ov.aiConfigured || !hasScenes || estimateMut.isPending || runGenerate.isPending}
+          onClick={generateClick}
+          title={aiProvider === 'local' ? 'Generate narration with the local AI service — free' : 'Generate narration with Gemini — shows cost estimate first'}
+        >
+          <Sparkles /> {runGenerate.isPending ? 'Generating…' : 'Generate story'}
         </Button>
       </div>
 
       {!ov.aiConfigured && (
         <div className="flex items-center gap-2 border-b border-warn/30 bg-warn/10 px-4 py-2 text-xs text-warn">
-          <TriangleAlert className="size-3.5" /> No AI API key configured on the server (GEMINI_API_KEY). Scene detection and story generation will fail until it is set.
+          <TriangleAlert className="size-3.5" /> No AI API key configured on the server (GEMINI_API_KEY). Story generation will fail until it is set (scene detection is local CV — unaffected).
+        </div>
+      )}
+      {!mergedUnits.length && readySources.length > 0 && (
+        <div className="flex items-center gap-2 border-b border-line bg-panel-2 px-4 py-2 text-xs text-muted">
+          <FileText className="size-3.5" /> Merge chapters into ≤50MB PDF units first — scene detection and story generation run on the merged PDF, not per chapter.
         </div>
       )}
       {running.length > 0 && (
@@ -141,28 +223,56 @@ const Studio = ({ projectId }: { projectId: string }) => {
           ))}
         </div>
       )}
+      <JobErrorBanner jobs={failed} />
 
       <div className="flex min-h-0 flex-1">
         {/* chapter rail */}
         <aside className="w-64 shrink-0 space-y-1 overflow-y-auto border-r border-line bg-panel p-2">
-          <p className="px-1 pb-1 text-[10px] uppercase tracking-wide text-muted">Chapters — select range</p>
-          {chapters.map((c) => (
+          <p className="px-1 pb-1 text-[10px] uppercase tracking-wide text-muted">PDF units &amp; chapters — select range</p>
+          {[...mergedUnits, ...chapters.filter((c: any) => c.kind !== 'merged')].map((c: any) => (
             <div key={c.id} className={`rounded-md border p-2 ${chapter?.id === c.id ? 'border-accent bg-panel-3' : 'border-line bg-panel-2'}`}>
               <div className="flex items-center gap-2">
                 <Checkbox checked={selected.size ? selected.has(c.id) : true} onCheckedChange={() => toggleChapter(c.id)} />
                 <button className="min-w-0 flex-1 text-left" onClick={() => setParams({ chapter: c.id })}>
-                  <span className="block truncate text-xs font-medium">Ch. {c.number}{c.title ? ` — ${c.title}` : ''}</span>
+                  <span className="block truncate text-xs font-medium">
+                    {c.kind === 'merged' ? <FileText className="mr-1 inline size-3 text-accent" /> : null}
+                    {c.kind === 'merged' ? c.title : `Ch. ${c.number}${c.title ? ` — ${c.title}` : ''}`}
+                  </span>
                   <span className="block text-[10px] text-muted">
                     {c.status !== 'ready' ? c.status : `${c.imageCount} pages · ${c.scenes} scenes · ${c.words}w`}
                     {c.duration > 0 && ` · ${formatDuration(c.duration)}`}
                   </span>
                 </button>
               </div>
-              <div className="mt-1 flex gap-1 pl-6">
+              <div className="mt-1 flex flex-wrap gap-1 pl-6">
+                {c.kind === 'merged' && <Badge tone="accent">PDF unit</Badge>}
                 <Badge tone={c.analysisStatus === 'done' ? 'ok' : c.analysisStatus === 'failed' ? 'danger' : c.analysisStatus === 'processing' ? 'warn' : 'neutral'}>scenes {c.analysisStatus}</Badge>
                 <Badge tone={c.storyStatus === 'done' ? 'ok' : c.storyStatus === 'failed' ? 'danger' : c.storyStatus === 'processing' ? 'warn' : 'neutral'}>story {c.storyStatus}</Badge>
                 {c.brokenImageCount > 0 && <Badge tone="warn">{c.brokenImageCount} broken</Badge>}
               </div>
+              {c.pdf?.url && (
+                <a
+                  href={c.pdf.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-1 block truncate pl-6 text-[10px] text-accent hover:underline"
+                  title={`Open ${c.pdf.fileName}`}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <FileText className="mr-1 inline size-3" />
+                  {c.pdf.fileName}{c.pdf.pageCount ? ` · ${c.pdf.pageCount}p` : ''}
+                </a>
+              )}
+              {c.storyStatus === 'done' && (
+                <button
+                  className="mt-1 flex items-center gap-1 pl-6 text-[10px] text-accent hover:underline"
+                  disabled={openVideo.isPending}
+                  onClick={(e) => { e.stopPropagation(); openVideo.mutate([c.id]); }}
+                  title="Build a video timeline from this unit's scenes and narration"
+                >
+                  <Clapperboard className="size-3" /> Open in Video Studio
+                </button>
+              )}
             </div>
           ))}
           {selected.size > 0 && (
@@ -198,10 +308,10 @@ const Studio = ({ projectId }: { projectId: string }) => {
       </div>
 
       <EstimateDialog
-        estimate={estimate?.est || null}
+        estimate={estimate}
         open={!!estimate}
         onOpenChange={(o) => !o && setEstimate(null)}
-        confirmLabel={estimate?.kind === 'detect' ? 'Detect scenes + narrate' : 'Rewrite narration'}
+        confirmLabel="Generate narration"
         loading={runJob.isPending}
         onConfirm={() => runJob.mutate()}
       />

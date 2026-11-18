@@ -1,7 +1,9 @@
 import { io, Socket } from 'socket.io-client';
 import { useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
+import { toast } from 'sonner';
 import { useAuth } from '@/stores/auth';
+import { api } from './api';
 import type { Job } from './types';
 
 let socket: Socket | null = null;
@@ -50,6 +52,9 @@ export const useProjectRoom = (projectId?: string) => {
   }, [projectId, token]);
 };
 
+/** Job ids already toasted as failed — cleared on retry so re-failures notify again. */
+const toastedFailures = new Set<string>();
+
 /**
  * Global realtime bridge: job progress is merged into the TanStack Query
  * cache and domain events invalidate the affected queries.
@@ -57,6 +62,25 @@ export const useProjectRoom = (projectId?: string) => {
 export const useRealtimeBridge = () => {
   const qc = useQueryClient();
   useSocketEvent<Job>('job:update', (job) => {
+    if (job.status === 'failed' && !toastedFailures.has(job.id)) {
+      toastedFailures.add(job.id);
+      toast.error(`${job.title} failed${job.error?.message ? `: ${job.error.message}` : ''}`, {
+        duration: 15000,
+        action: {
+          label: 'Retry',
+          onClick: async () => {
+            try {
+              await api.post(`/api/jobs/${job.id}/retry`);
+              toastedFailures.delete(job.id);
+              toast.success('Retry queued');
+              qc.invalidateQueries({ queryKey: ['jobs'] });
+            } catch (e: any) {
+              toast.error(e.message);
+            }
+          },
+        },
+      });
+    }
     qc.setQueryData<Job[]>(['jobs'], (prev) => {
       if (!prev) return prev;
       const idx = prev.findIndex((j) => j.id === job.id);

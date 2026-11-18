@@ -2,11 +2,9 @@ import fs from 'fs';
 import path from 'path';
 import PDFDocument from 'pdfkit';
 import MangaChapter from 'models/manga-chapter.model';
-import ComicArchive from 'models/comic-archive.model';
-import ComicImage from 'models/comic-image.model';
+import ComicImage, { IComicImageDocument } from 'models/comic-image.model';
 import PdfExport from 'models/pdf-export.model';
 import { registerJobHandler, NonRetryableError, JobCancelledError } from 'libs/jobs/runner';
-import { openComicArchive, ArchiveError } from 'libs/studio/archive';
 import { projectFolder, resolveLocal, storeLocalFile } from 'libs/studio/media';
 import { makeTempDir, removeDir } from 'libs/studio/paths';
 import { openSharp } from 'libs/studio/images';
@@ -69,20 +67,26 @@ registerJobHandler<{ exportId: string }>('pdf-conversion', async (ctx) => {
   const tempDir = await makeTempDir('pdf');
   const outPath = path.join(tempDir, 'output.pdf');
   try {
-    // Count pages first for accurate progress
-    await ctx.progress(1, 'Reading archives');
-    const sources: { chapter: (typeof ordered)[number]; archivePath: string }[] = [];
+    // Pages come from the extracted ComicImage rows (skipped/deleted pages and
+    // manual replacements are reflected) — the CBZ itself is not kept on disk.
+    // A chapter may still be extracting; wait for it before giving up.
+    await ctx.progress(1, 'Reading pages');
+    const sources: { chapter: (typeof ordered)[number]; images: IComicImageDocument[] }[] = [];
     let totalPages = 0;
     for (const chapter of ordered) {
-      const archive = await ComicArchive.findById(chapter.archive);
-      if (!archive) throw new NonRetryableError(`Chapter ${chapter.number} has no CBZ archive`);
-      const archivePath = await resolveLocal(archive.file, tempDir);
-      const a = await openComicArchive(archivePath).catch((e) => {
-        throw e instanceof ArchiveError ? new NonRetryableError(`Chapter ${chapter.number}: ${e.message}`) : e;
-      });
-      totalPages += a.listing.images.length;
-      a.close();
-      sources.push({ chapter, archivePath });
+      const deadline = Date.now() + 5 * 60 * 1000;
+      while (['uploaded', 'extracting'].includes(chapter.status)) {
+        ctx.throwIfCancelled();
+        if (Date.now() > deadline) throw new NonRetryableError(`Chapter ${chapter.number} extraction did not finish in time`);
+        await ctx.progress(1, `Waiting for chapter ${chapter.number} extraction`);
+        await new Promise((r) => setTimeout(r, 2000));
+        chapter.status = (await MangaChapter.findById(chapter._id).select('status'))?.status ?? chapter.status;
+      }
+      if (chapter.status !== 'ready') throw new NonRetryableError(`Chapter ${chapter.number} extraction failed — fix it before exporting`);
+      const images = await ComicImage.find({ chapter: chapter._id }).sort({ index: 1 });
+      if (!images.length) throw new NonRetryableError(`Chapter ${chapter.number} has no extracted pages`);
+      totalPages += images.length;
+      sources.push({ chapter, images });
     }
 
     const doc = new PDFDocument({
@@ -99,56 +103,45 @@ registerJobHandler<{ exportId: string }>('pdf-conversion', async (ctx) => {
     doc.pipe(out);
 
     let pageNo = 0;
-    for (const { chapter, archivePath } of sources) {
-      const archive = await openComicArchive(archivePath);
-      // Pages the user replaced in the library are used instead of the CBZ version
-      const replacements = new Map<string, string>();
-      (await ComicImage.find({ chapter: chapter._id, status: 'replaced' }).select('entryName file')).forEach((img) => {
-        if (img.file) replacements.set(img.entryName, String(img.file));
-      });
-      try {
-        let first = true;
-        for (const item of archive.listing.images) {
-          if (ctx.signal.aborted) throw new JobCancelledError();
-          pageNo += 1;
-          let prepared: Awaited<ReturnType<typeof prepareImage>> | null = null;
-          try {
-            const replacementId = replacements.get(item.name);
-            const buf = replacementId
-              ? await fs.promises.readFile(await resolveLocal(replacementId, tempDir))
-              : await archive.readBuffer(item);
-            prepared = await prepareImage(buf, exp.options.compression);
-          } catch (error: any) {
-            await ctx.log(`Chapter ${chapter.number} page ${item.name}: ${error.message} — placeholder page inserted`, 'warn');
-          }
-
-          const width = prepared?.width ?? 800;
-          const height = prepared?.height ?? 1100;
-          const scale = Math.min(PX_TO_PT, (MAX_PAGE_PT - NUMBER_STRIP_PT) / height);
-          const pw = width * scale;
-          const ph = height * scale;
-          const strip = exp.options.pageNumbers ? NUMBER_STRIP_PT : 0;
-          doc.addPage({ size: [pw, ph + strip], margin: 0 });
-          if (prepared) {
-            doc.image(prepared.data, 0, 0, { width: pw, height: ph });
-          } else {
-            doc.rect(0, 0, pw, ph).fill('#f1f3f5');
-            doc.fillColor('#495057').fontSize(16).text(`Page could not be decoded\n${item.name}`, 20, ph / 2 - 20, {
-              width: pw - 40,
-              align: 'center',
-            });
-          }
-          if (strip) {
-            doc.fillColor('#555555').fontSize(10).text(String(pageNo), 0, ph + 6, { width: pw, align: 'center', lineBreak: false });
-          }
-          if (first && exp.options.bookmarks) {
-            doc.outline.addItem(`Chapter ${chapter.number} — ${chapter.title}`);
-            first = false;
-          }
-          await ctx.progress(2 + (93 * pageNo) / totalPages, `Chapter ${chapter.number}: page ${pageNo}/${totalPages}`);
+    for (const { chapter, images } of sources) {
+      let first = true;
+      for (const img of images) {
+        if (ctx.signal.aborted) throw new JobCancelledError();
+        pageNo += 1;
+        const pageName = img.entryName || `page ${img.index + 1}`;
+        let prepared: Awaited<ReturnType<typeof prepareImage>> | null = null;
+        try {
+          if (!img.file) throw new Error('page file is missing');
+          const buf = await fs.promises.readFile(await resolveLocal(img.file, tempDir));
+          prepared = await prepareImage(buf, exp.options.compression);
+        } catch (error: any) {
+          await ctx.log(`Chapter ${chapter.number} page ${pageName}: ${error.message} — placeholder page inserted`, 'warn');
         }
-      } finally {
-        archive.close();
+
+        const width = prepared?.width ?? 800;
+        const height = prepared?.height ?? 1100;
+        const scale = Math.min(PX_TO_PT, (MAX_PAGE_PT - NUMBER_STRIP_PT) / height);
+        const pw = width * scale;
+        const ph = height * scale;
+        const strip = exp.options.pageNumbers ? NUMBER_STRIP_PT : 0;
+        doc.addPage({ size: [pw, ph + strip], margin: 0 });
+        if (prepared) {
+          doc.image(prepared.data, 0, 0, { width: pw, height: ph });
+        } else {
+          doc.rect(0, 0, pw, ph).fill('#f1f3f5');
+          doc.fillColor('#495057').fontSize(16).text(`Page could not be decoded\n${pageName}`, 20, ph / 2 - 20, {
+            width: pw - 40,
+            align: 'center',
+          });
+        }
+        if (strip) {
+          doc.fillColor('#555555').fontSize(10).text(String(pageNo), 0, ph + 6, { width: pw, align: 'center', lineBreak: false });
+        }
+        if (first && exp.options.bookmarks) {
+          doc.outline.addItem(`Chapter ${chapter.number} — ${chapter.title}`);
+          first = false;
+        }
+        await ctx.progress(2 + (93 * pageNo) / totalPages, `Chapter ${chapter.number}: page ${pageNo}/${totalPages}`);
       }
     }
 

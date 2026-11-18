@@ -98,14 +98,20 @@ export const useSegments = (projectId?: string, language?: string, mode?: string
 export const useCharacters = (projectId?: string) =>
   useQuery({ queryKey: ['characters', projectId], queryFn: () => api.get<StoryCharacter[]>(`/api/story/projects/${projectId}/characters`), enabled: !!projectId });
 
+export const mangaApi = {
+  /** Merge ready chapters into ≤50MB PDF "special chapter" units (queued conversion). */
+  merge: (projectId: string, body: { chapterIds?: string[]; maxSizeMB?: number } = {}) =>
+    api.post<{ units: number; chapters: Chapter[]; exports: { id: string; fileName: string; jobId: string }[] }>(`/api/manga/projects/${projectId}/merge`, body),
+};
+
 export const storyApi = {
   estimateScenes: (projectId: string, chapterIds: string[]) => api.post<CostEstimate>('/api/story/estimate/scenes', { projectId, chapterIds }),
   estimateStory: (projectId: string, chapterIds: string[], language: string, mode: string) =>
     api.post<CostEstimate>('/api/story/estimate/story', { projectId, chapterIds, language, mode }),
-  detect: (projectId: string, chapterIds: string[], estimateId: string, opts: { overwriteEdited?: boolean; redetectPanels?: boolean } = {}) =>
-    api.post<Job[]>('/api/story/detect', { projectId, chapterIds, estimateId, ...opts }),
-  generate: (projectId: string, chapterIds: string[], language: string, mode: string, estimateId: string, opts: { overwriteEdited?: boolean } = {}) =>
-    api.post<Job>('/api/story/generate', { projectId, chapterIds, language, mode, estimateId, ...opts }),
+  detect: (projectId: string, chapterIds: string[], opts: { overwriteEdited?: boolean; redetectPanels?: boolean; estimateId?: string } = {}) =>
+    api.post<Job[]>('/api/story/detect', { projectId, chapterIds, ...opts }),
+  generate: (projectId: string, chapterIds: string[], language: string, mode: string, estimateId?: string, opts: { overwriteEdited?: boolean; direct?: boolean } = {}) =>
+    api.post<Job | { job: Job; result: { chapters: number; segments: number } }>('/api/story/generate', { projectId, chapterIds, language, mode, estimateId, ...opts }),
   updateScene: (id: string, body: Partial<DetectedScene>) => api.put<DetectedScene>(`/api/story/scenes/${id}`, body),
   createScene: (chapterId: string, body: { afterSceneId?: string; regions: { image: string; bbox: BBox }[]; title?: string }) =>
     api.post<DetectedScene>(`/api/story/chapters/${chapterId}/scenes`, body),

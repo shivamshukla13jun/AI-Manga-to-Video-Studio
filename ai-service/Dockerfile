@@ -1,5 +1,8 @@
-# Optional local TTS inference service for AI Manga-to-Video Studio.
-# Base image contains no TTS models — install engines at build time by
+# Optional local AI service for AI Manga-to-Video Studio.
+# Provides OpenCV panel detection (/detect-panels, always available),
+# a local vision-language story model (/generate-json — Phi-3.5-vision ONNX
+# auto-downloads ~4GB on first use; or mount it and set LOCAL_STORY_MODEL_DIR),
+# and optional local TTS engines — install engines at build time by
 # uncommenting the optional lines in requirements.txt, or mount ./voices
 # with Piper .onnx models.
 FROM python:3.11-slim
