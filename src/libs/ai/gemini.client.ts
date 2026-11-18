@@ -9,7 +9,8 @@ import { NonRetryableError } from 'libs/jobs/runner';
 export type InteractionContent =
   | { type: 'text'; text: string; annotations?: Record<string, unknown>[] }
   | { type: 'image'; data: string; mime_type: string }
-  | { type: 'file'; uri: string; mime_type: string }
+  | { type: 'image'; uri: string; mime_type: string }
+  | { type: 'document'; uri: string; mime_type: string }
   | { type: 'audio'; data: string; mime_type: string };
 
 export interface UploadedFile {
@@ -145,6 +146,9 @@ const assertKey = () => {
   }
 };
 
+/** Longest we'll sleep inside one request — beyond this, treat as quota-exhausted and let fallbacks/job retry handle it. */
+const MAX_RETRY_WAIT_MS = 90_000;
+
 const parseUsage = (u: any): InteractionUsage => ({
   inputTokens: Number(u?.total_input_tokens || 0),
   outputTokens: Number(u?.total_output_tokens || 0),
@@ -204,6 +208,12 @@ export const geminiFetch = async (path: string, init: { method?: string; body?: 
     if (attempt >= maxAttempts) throw new GeminiError(message, res.status, true);
     const retryAfter = Number(res.headers.get('retry-after'));
     const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1500 * 2 ** attempt;
+    // a retry-after measured in hours means daily quota — fail fast so the
+    // model fallback chain or job retry handles it instead of sleeping here
+    if (waitMs > MAX_RETRY_WAIT_MS) {
+      await init.onLog?.(`Gemini API ${res.status}: ${message} — server asked to wait ${Math.round(waitMs / 60000)}min, not retrying in-flight`, 'warn');
+      throw new GeminiError(message, res.status, true);
+    }
     await init.onLog?.(`Gemini API ${res.status}: ${message} — retry ${attempt}/${maxAttempts - 1} in ${Math.round(waitMs / 1000)}s`, 'warn');
     await sleep(waitMs, init.signal);
   }

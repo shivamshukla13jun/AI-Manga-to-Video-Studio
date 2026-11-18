@@ -158,6 +158,31 @@ export const detectPanels = async (input: string | Buffer, opts: { rtl?: boolean
   return detectPanelsLocal(input, opts);
 };
 
+export interface OcrLine {
+  text: string;
+  confidence: number;
+}
+
+/** OCR a batch of images via the python ai-service (/ocr). Returns one line array per input image. */
+export const ocrImages = async (images: Buffer[], signal?: AbortSignal): Promise<OcrLine[][]> => {
+  const base = config.PANEL_DETECT_URL;
+  if (!base || !images.length) return images.map(() => []);
+  try {
+    const res = await fetch(`${base}/ocr`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ images: images.map((b) => b.toString('base64')) }),
+      signal: signal || AbortSignal.timeout(180_000),
+    });
+    if (!res.ok) throw new Error(`OCR service error ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    const data: any = await res.json();
+    return (data?.results || []).map((r: any) => (r?.lines || []).map((l: any) => ({ text: String(l?.text || ''), confidence: Number(l?.confidence) || 0 })));
+  } catch (e: any) {
+    if (signal?.aborted) throw e;
+    throw new Error(`OCR failed — is the ai-service running with rapidocr installed? (${e.message})`);
+  }
+};
+
 const clampBox = (b: any): NBox | null => {
   const x = Math.min(1, Math.max(0, Number(b?.x) || 0));
   const y = Math.min(1, Math.max(0, Number(b?.y) || 0));

@@ -12,7 +12,7 @@ import { emitToUser } from 'libs/realtime/events';
 import { serializeChapter } from 'microservices/manga-service/manga.serializers';
 import { upsertCharacters } from './scene.processor';
 import ComicImage from 'models/comic-image.model';
-import { cropRegion } from 'libs/studio/panels';
+import { cropRegion, ocrImages } from 'libs/studio/panels';
 import { resolveLocal } from 'libs/studio/media';
 import { makeTempDir, removeDir } from 'libs/studio/paths';
 import { uploadFile } from 'libs/ai/gemini.client';
@@ -54,6 +54,7 @@ type Report = (frac: number, stage: string) => Promise<void>;
 const sceneImages = async (ctx: JobContext, scenes: IDetectedSceneDocument[], tempDir: string, useFilesApi: boolean, report: Report) => {
   const docs = new Map((await ComicImage.find({ _id: { $in: scenes.flatMap((s) => s.regions.map((r) => r.image)) } })).map((i) => [String(i._id), i]));
   const images: VisionImage[] = [];
+  const sceneOf: number[] = [];
   for (let i = 0; i < scenes.length; i++) {
     const parts = scenes[i].regions.slice(0, 3);
     for (let k = 0; k < parts.length; k++) {
@@ -65,11 +66,12 @@ const sceneImages = async (ctx: JobContext, scenes: IDetectedSceneDocument[], te
         mimeType: 'image/jpeg',
         label: parts.length > 1 ? `SCENE ${i + 1} · PART ${k + 1}` : `SCENE ${i + 1}`,
       });
+      sceneOf.push(i);
     }
     await report((i + 1) / scenes.length * 0.3, `Cropping scene ${i + 1}/${scenes.length}`);
   }
   await ctx.log(`${images.length} scene image(s) cropped from ${scenes.length} scenes`);
-  if (!useFilesApi) return images;
+  if (!useFilesApi) return { images, sceneOf };
   const total = images.length;
   let done = 0;
   const queue = images.map((img, i) => ({ img, label: img.label || `scene-${i}` }));
@@ -85,19 +87,47 @@ const sceneImages = async (ctx: JobContext, scenes: IDetectedSceneDocument[], te
   );
   const uploaded = images.filter((i) => i.uri).length;
   if (uploaded) await ctx.log(`Uploaded ${uploaded} scene image(s) to Gemini Files API`, 'info');
-  return images;
+  return { images, sceneOf };
+};
+
+/** OCR each scene's crops via the local ai-service; lines become scene dialogue hints for the prompt. */
+const ocrScenes = async (ctx: JobContext, scenes: IDetectedSceneDocument[], images: VisionImage[], sceneOf: number[], signal: AbortSignal, report: Report) => {
+  if (!images.length) return;
+  await report(0.58, `OCR: extracting text from ${images.length} scene crop(s)`);
+  try {
+    const results = await ocrImages(images.map((i) => i.data), signal);
+    const byScene: string[][] = scenes.map(() => []);
+    results.forEach((lines, k) => {
+      for (const l of lines) if (l.text?.trim() && l.confidence >= 0.5) byScene[sceneOf[k]]?.push(l.text.trim());
+    });
+    let found = 0;
+    for (let i = 0; i < scenes.length; i++) {
+      if (!byScene[i].length) continue;
+      found += byScene[i].length;
+      const prev = new Set(scenes[i].dialogues.map((d) => d.text.trim()));
+      const fresh = byScene[i].filter((t) => !prev.has(t));
+      if (fresh.length) {
+        scenes[i].dialogues.push(...fresh.map((text) => ({ text, kind: 'speech' as const, uncertain: true })));
+        await scenes[i].save();
+      }
+    }
+    await ctx.log(found ? `OCR extracted ${found} text line(s) across scenes — feeding as dialogue hints` : 'OCR found no readable text in scene crops');
+  } catch (e: any) {
+    await ctx.log(`OCR skipped: ${e.message}`, 'warn');
+  }
 };
 
 const generateChapter = async (
   ctx: JobContext,
   chapter: IMangaChapterDocument,
   scenes: IDetectedSceneDocument[],
-  opts: { language: string; mode: 'original' | 'recap'; continuity?: string; previousSummary?: string; projectId: Types.ObjectId; title: string; provider: 'local' | 'gemini' },
+  opts: { language: string; mode: 'original' | 'recap'; continuity?: string; previousSummary?: string; projectId: Types.ObjectId; title: string; provider: 'local' | 'gemini'; useOcr?: boolean },
   tempDir: string,
   report: Report
 ) => {
   const provider = getVisionProvider(opts.provider);
-  const images = await sceneImages(ctx, scenes, tempDir, opts.provider === 'gemini', report);
+  const { images, sceneOf } = await sceneImages(ctx, scenes, tempDir, opts.provider === 'gemini', report);
+  if (opts.useOcr) await ocrScenes(ctx, scenes, images, sceneOf, ctx.signal, report);
   await report(0.62, 'Building prompt and character registry');
   const base = [
     `Manga: ${opts.title}. Chapter ${chapter.number}${chapter.title ? ` — ${chapter.title}` : ''}.`,
@@ -105,6 +135,12 @@ const generateChapter = async (
     `Known characters (JSON): ${JSON.stringify(await characterRegistry(opts.projectId))}`,
     opts.continuity ? `Story so far: ${opts.continuity}` : 'This is the beginning of the story.',
     opts.previousSummary ? `Previous chapter summary: ${opts.previousSummary}` : '',
+    scenes.some((s) => s.dialogues.length)
+      ? `Extracted speech/narration text per scene (OCR — may contain errors; use only when it matches the image):\n${scenes
+          .map((s, i) => (s.dialogues.length ? `SCENE ${i + 1}: ${s.dialogues.map((d) => `"${d.text}"`).join(' | ')}` : null))
+          .filter(Boolean)
+          .join('\n')}`
+      : '',
   ]
     .filter(Boolean)
     .join('\n');
@@ -127,7 +163,7 @@ const generateChapter = async (
   throw new Error(`Chapter ${chapter.number}: the model could not produce narration covering every scene. Try again or edit scenes first.`);
 };
 
-export const generateRange = async (ctx: JobContext<{ projectId: string; chapterIds: string[]; language: string; mode: 'original' | 'recap'; overwriteEdited?: boolean; provider?: string }>) => {
+export const generateRange = async (ctx: JobContext<{ projectId: string; chapterIds: string[]; language: string; mode: 'original' | 'recap'; overwriteEdited?: boolean; provider?: string; useOcr?: boolean }>) => {
   await ctx.progress(1, 'Loading project and settings');
   const project = await MangaProject.findById(ctx.payload.projectId);
   if (!project) throw new NonRetryableError('Project no longer exists');
@@ -140,7 +176,7 @@ export const generateRange = async (ctx: JobContext<{ projectId: string; chapter
     (a, b) => ctx.payload.chapterIds.indexOf(String(a._id)) - ctx.payload.chapterIds.indexOf(String(b._id))
   );
   if (!chapters.length) throw new NonRetryableError('No chapters selected');
-  await ctx.log(`Writing ${mode} narration in ${language} for ${chapters.length} chapter(s): ${chapters.map((c) => c.number).join(', ')} · provider ${provider.name}`);
+  await ctx.log(`Writing ${mode} narration in ${language} for ${chapters.length} chapter(s): ${chapters.map((c) => c.number).join(', ')} · provider ${provider.name}${ctx.payload.useOcr ? ' · OCR dialogue extraction on' : ''}`);
 
   await ctx.progress(3, 'Checking scene coverage');
   const noScenes = [];
@@ -175,7 +211,7 @@ export const generateRange = async (ctx: JobContext<{ projectId: string; chapter
     try {
       const scenes = await DetectedScene.find({ chapter: chapter._id }).sort({ order: 1 });
       await ctx.log(`Chapter ${chapter.number}: loaded ${scenes.length} detected scene(s)`);
-      const out = await generateChapter(ctx, chapter, scenes, { language, mode, continuity, previousSummary, projectId: project._id as Types.ObjectId, title: project.title, provider: aiProvider }, tempDir, report);
+      const out = await generateChapter(ctx, chapter, scenes, { language, mode, continuity, previousSummary, projectId: project._id as Types.ObjectId, title: project.title, provider: aiProvider, useOcr: ctx.payload.useOcr }, tempDir, report);
       ctx.throwIfCancelled();
 
       await report(0.9, `Saving ${out.segments.length} narration segment(s)`);

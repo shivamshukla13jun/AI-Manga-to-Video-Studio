@@ -14,6 +14,8 @@ Endpoints:
   GET  /voices         -> { voices: [{id, name, engine, languages, gender}] }
   POST /tts            -> {text, voice, language, speed} -> audio/wav
   POST /detect-panels  -> raw image bytes or {image: base64, rtl} -> {panels: [{x,y,width,height}]}
+  POST /ocr            -> {images: [base64]} -> {results: [{lines: [{text, confidence}]}]}
+                         RapidOCR (ONNX) — speech-bubble text extraction for story generation
   POST /generate-json  -> {system, prompt, schema, images:[{data,mimeType,label}]} -> {data, usage, model}
                          Backends, in priority order:
                            1) STORY_LLM_BASE_URL set -> OpenAI-compatible cloud endpoint
@@ -508,6 +510,49 @@ def generate_json(req: GenerateJsonRequest):
         raise HTTPException(503, str(e))
     except Exception as e:
         raise HTTPException(500, f"local generation failed: {e}")
+
+
+_OCR = {"engine": "unloaded", "failed": None}
+
+
+def _ocr_engine():
+    """Lazy-load RapidOCR (ONNX). Downloads small det/rec/cls models on first use."""
+    if _OCR["engine"] == "unloaded" and not _OCR["failed"]:
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+
+            _OCR["engine"] = RapidOCR()
+        except Exception as e:
+            _OCR["failed"] = str(e)
+            _OCR["engine"] = None
+    if _OCR["engine"] is None:
+        raise RuntimeError(f"OCR unavailable: {_OCR['failed'] or 'rapidocr-onnxruntime not installed'}")
+    return _OCR["engine"]
+
+
+class OcrRequest(BaseModel):
+    images: list[str]  # base64-encoded image bytes
+
+
+@app.post("/ocr")
+def ocr(req: OcrRequest):
+    """Extract text lines from scene crops — dialogue for story grounding."""
+    try:
+        engine = _ocr_engine()
+        import numpy as np
+        from PIL import Image
+
+        results = []
+        for b64 in req.images:
+            img = np.array(Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB"))
+            det, _ = engine(img)
+            lines = [{"text": t, "confidence": round(float(c), 3)} for _, t, c in (det or [])]
+            results.append({"lines": lines})
+        return {"results": results}
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"OCR failed: {e}")
 
 
 @app.post("/detect-panels")

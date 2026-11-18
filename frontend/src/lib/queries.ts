@@ -110,7 +110,7 @@ export const storyApi = {
     api.post<CostEstimate>('/api/story/estimate/story', { projectId, chapterIds, language, mode }),
   detect: (projectId: string, chapterIds: string[], opts: { overwriteEdited?: boolean; redetectPanels?: boolean; estimateId?: string } = {}) =>
     api.post<Job[]>('/api/story/detect', { projectId, chapterIds, ...opts }),
-  generate: (projectId: string, chapterIds: string[], language: string, mode: string, estimateId?: string, opts: { overwriteEdited?: boolean; direct?: boolean } = {}) =>
+  generate: (projectId: string, chapterIds: string[], language: string, mode: string, estimateId?: string, opts: { overwriteEdited?: boolean; direct?: boolean; useOcr?: boolean } = {}) =>
     api.post<Job | { job: Job; result: { chapters: number; segments: number } }>('/api/story/generate', { projectId, chapterIds, language, mode, estimateId, ...opts }),
   updateScene: (id: string, body: Partial<DetectedScene>) => api.put<DetectedScene>(`/api/story/scenes/${id}`, body),
   createScene: (chapterId: string, body: { afterSceneId?: string; regions: { image: string; bbox: BBox }[]; title?: string }) =>

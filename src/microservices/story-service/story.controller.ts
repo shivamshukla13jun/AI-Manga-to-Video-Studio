@@ -200,7 +200,7 @@ export const generateStory = asyncHandler(async (req, res) => {
   if (count !== chapterIds.length) throw new AppError('Some chapters were not found in this project', 400);
   // Local AI is free — no paid-estimate confirmation needed.
   const est = settings.aiProvider === 'local' ? undefined : await approveEstimate(project.owner, req.body.estimateId, 'story-generation', { chapterIds, language, mode });
-  const payload = { projectId: String(project._id), chapterIds, language, mode, overwriteEdited: req.body.overwriteEdited, estimateId: est ? String(est._id) : undefined, provider: settings.aiProvider };
+  const payload = { projectId: String(project._id), chapterIds, language, mode, overwriteEdited: req.body.overwriteEdited, estimateId: est ? String(est._id) : undefined, provider: settings.aiProvider, useOcr: !!req.body.useOcr };
   const title = `Write ${mode} narration (${language}) — ${chapterIds.length} chapter(s)`;
 
   // Direct mode: run the generation inline so errors surface in this response.

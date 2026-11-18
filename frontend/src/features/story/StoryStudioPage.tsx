@@ -101,6 +101,7 @@ const Studio = ({ projectId }: { projectId: string }) => {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [estimate, setEstimate] = useState<CostEstimate | null>(null);
   const [runMode, setRunMode] = useState<'queue' | 'direct'>('queue');
+  const [useOcr, setUseOcr] = useState(false);
   const [, setEstimateAction] = useState<'detect' | 'story'>('story');
   const navigate = useNavigate();
 
@@ -136,7 +137,7 @@ const Studio = ({ projectId }: { projectId: string }) => {
     {}
   );
   const runGenerate = useAction(
-    async (estimateId?: string) => storyApi.generate(projectId, chosenIds, language, mode, estimateId, { direct: runMode === 'direct' }),
+    async (estimateId?: string) => storyApi.generate(projectId, chosenIds, language, mode, estimateId, { direct: runMode === 'direct', useOcr }),
     {
       success: (r: any) => (r?.result ? `Narration written — ${r.result.segments} segments` : 'Story generation queued — watch progress in Render Manager'),
       onSuccess: () => { setEstimate(null); overview.refetch(); aiJobs.refetch(); },
@@ -146,7 +147,7 @@ const Studio = ({ projectId }: { projectId: string }) => {
   const runJob = useAction(
     async () => {
       if (!estimate) return;
-      await storyApi.generate(projectId, chosenIds, language, mode, estimate.id, { direct: runMode === 'direct' });
+      await storyApi.generate(projectId, chosenIds, language, mode, estimate.id, { direct: runMode === 'direct', useOcr });
     },
     {
       success: 'Job queued — watch progress in Render Manager',
@@ -234,6 +235,10 @@ const Studio = ({ projectId }: { projectId: string }) => {
           <option value="queue">Run in background</option>
           <option value="direct">Run direct (see errors)</option>
         </NativeSelect>
+        <label className="flex items-center gap-1.5 text-xs text-muted" title="Extract speech-bubble text from scene images with local OCR and feed it into the prompt">
+          <Checkbox checked={useOcr} onCheckedChange={(v) => setUseOcr(v === true)} />
+          OCR text
+        </label>
         <Button
           size="sm"
           variant="primary"

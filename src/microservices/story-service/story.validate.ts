@@ -37,6 +37,8 @@ export const generateSchema = storyEstimateSchema.extend({
   overwriteEdited: z.boolean().default(false),
   /** true → run inline in this request (errors returned directly); false → background job */
   direct: z.boolean().default(false),
+  /** true → OCR scene crops via the local ai-service and feed dialogue text into the prompt */
+  useOcr: z.boolean().default(false),
 });
 
 export const sceneUpdateSchema = z.object({

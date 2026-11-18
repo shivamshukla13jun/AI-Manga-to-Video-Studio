@@ -68,7 +68,7 @@ class GeminiVisionProvider implements VisionLanguageProvider {
         if (img.label) input.push({ type: 'text', text: img.label });
         input.push(
           useFiles && img.uri
-            ? { type: 'file', uri: img.uri, mime_type: img.mimeType }
+            ? { type: 'image', uri: img.uri, mime_type: img.mimeType }
             : { type: 'image', data: img.data.toString('base64'), mime_type: img.mimeType }
         );
       }
