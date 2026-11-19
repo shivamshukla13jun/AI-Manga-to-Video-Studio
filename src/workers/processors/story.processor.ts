@@ -15,7 +15,6 @@ import ComicImage from 'models/comic-image.model';
 import { cropRegion, ocrImages } from 'libs/studio/panels';
 import { resolveLocal } from 'libs/studio/media';
 import { makeTempDir, removeDir } from 'libs/studio/paths';
-import { uploadFile } from 'libs/ai/gemini.client';
 
 export const wordsPerMinute = (settings: { wordsPerMinute?: Record<string, number> }, language: string) =>
   Number(settings.wordsPerMinute?.[language] || settings.wordsPerMinute?.default || 145);
@@ -50,8 +49,8 @@ const validCoverage = (segments: any[], sceneCount: number) => {
 
 type Report = (frac: number, stage: string) => Promise<void>;
 
-/** Crop every scene's regions; for Gemini, upload them to the Files API once — one vision call per chapter. */
-const sceneImages = async (ctx: JobContext, scenes: IDetectedSceneDocument[], tempDir: string, useFilesApi: boolean, report: Report) => {
+/** Crop every scene's regions — sent inline to the provider, one vision call per chapter. */
+const sceneImages = async (ctx: JobContext, scenes: IDetectedSceneDocument[], tempDir: string, report: Report) => {
   const docs = new Map((await ComicImage.find({ _id: { $in: scenes.flatMap((s) => s.regions.map((r) => r.image)) } })).map((i) => [String(i._id), i]));
   const images: VisionImage[] = [];
   const sceneOf: number[] = [];
@@ -71,22 +70,6 @@ const sceneImages = async (ctx: JobContext, scenes: IDetectedSceneDocument[], te
     await report((i + 1) / scenes.length * 0.3, `Cropping scene ${i + 1}/${scenes.length}`);
   }
   await ctx.log(`${images.length} scene image(s) cropped from ${scenes.length} scenes`);
-  if (!useFilesApi) return { images, sceneOf };
-  const total = images.length;
-  let done = 0;
-  const queue = images.map((img, i) => ({ img, label: img.label || `scene-${i}` }));
-  await Promise.all(
-    Array.from({ length: Math.min(6, queue.length) }, async () => {
-      while (queue.length) {
-        const item = queue.shift()!;
-        const f = await uploadFile(item.img.data, 'image/jpeg', item.label, ctx.signal, (m, l) => ctx.log(m, l));
-        if (f) item.img.uri = f.uri;
-        await report(0.3 + (++done / total) * 0.3, `Uploading scene image ${done}/${total} to Files API`);
-      }
-    })
-  );
-  const uploaded = images.filter((i) => i.uri).length;
-  if (uploaded) await ctx.log(`Uploaded ${uploaded} scene image(s) to Gemini Files API`, 'info');
   return { images, sceneOf };
 };
 
@@ -94,24 +77,42 @@ const sceneImages = async (ctx: JobContext, scenes: IDetectedSceneDocument[], te
 const ocrScenes = async (ctx: JobContext, scenes: IDetectedSceneDocument[], images: VisionImage[], sceneOf: number[], signal: AbortSignal, report: Report) => {
   if (!images.length) return;
   await report(0.58, `OCR: extracting text from ${images.length} scene crop(s)`);
+  // Scanlation site watermarks/ads picked up by OCR — never feed them to the model as dialogue.
+  const WATERMARK_RE = /asura[\s_.\-]*scans?|asura\s*\.\s*(to|com|net)|scanlation|flame[\s_.\-]*scans?|reaper[\s_.\-]*scans?|luminous[\s_.\-]*scans?|discord\.gg\/|t\.me\/|\b\S+\.(com|net|to|gg)\b/i;
+  const isWatermark = (t: string) => WATERMARK_RE.test(t) || t.replace(/[^a-z]/gi, '').length < 2;
   try {
-    const results = await ocrImages(images.map((i) => i.data), signal);
-    const byScene: string[][] = scenes.map(() => []);
+    const { lines: results, translated } = await ocrImages(
+      images.map((i) => i.data),
+      { signal, translateTo: 'hi-roman' }
+    );
+    const byScene: { text: string; hi?: string }[][] = scenes.map(() => []);
+    let watermarked = 0;
     results.forEach((lines, k) => {
-      for (const l of lines) if (l.text?.trim() && l.confidence >= 0.5) byScene[sceneOf[k]]?.push(l.text.trim());
+      for (const l of lines) {
+        const text = l.text?.trim();
+        if (!text || l.confidence < 0.5) continue;
+        if (isWatermark(text)) { watermarked++; continue; }
+        byScene[sceneOf[k]]?.push({ text, hi: l.translated?.trim() });
+      }
     });
     let found = 0;
     for (let i = 0; i < scenes.length; i++) {
       if (!byScene[i].length) continue;
       found += byScene[i].length;
       const prev = new Set(scenes[i].dialogues.map((d) => d.text.trim()));
-      const fresh = byScene[i].filter((t) => !prev.has(t));
+      const fresh = byScene[i].filter((t) => !prev.has(t.text));
       if (fresh.length) {
-        scenes[i].dialogues.push(...fresh.map((text) => ({ text, kind: 'speech' as const, uncertain: true })));
+        scenes[i].dialogues.push(...fresh.map((t) => ({ text: t.hi ? `${t.text} → ${t.hi}` : t.text, kind: 'speech' as const, uncertain: true })));
         await scenes[i].save();
       }
     }
-    await ctx.log(found ? `OCR extracted ${found} text line(s) across scenes — feeding as dialogue hints` : 'OCR found no readable text in scene crops');
+    await ctx.log(
+      found
+        ? `OCR extracted ${found} text line(s)${translated ? ' + romanized Hindi translations' : ''} across scenes — feeding as dialogue hints`
+        : 'OCR found no readable text in scene crops'
+    );
+    if (watermarked) await ctx.log(`OCR filtered ${watermarked} watermark/site line(s) (asurascans etc.) — excluded from story`);
+    if (found && !translated) await ctx.log('Hindi translation unavailable (cloud endpoint not configured/unreachable) — using original text', 'warn');
   } catch (e: any) {
     await ctx.log(`OCR skipped: ${e.message}`, 'warn');
   }
@@ -126,7 +127,7 @@ const generateChapter = async (
   report: Report
 ) => {
   const provider = getVisionProvider(opts.provider);
-  const { images, sceneOf } = await sceneImages(ctx, scenes, tempDir, opts.provider === 'gemini', report);
+  const { images, sceneOf } = await sceneImages(ctx, scenes, tempDir, report);
   if (opts.useOcr) await ocrScenes(ctx, scenes, images, sceneOf, ctx.signal, report);
   await report(0.62, 'Building prompt and character registry');
   const base = [
@@ -147,15 +148,16 @@ const generateChapter = async (
 
   let prompt = base;
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const label = `Chapter ${chapter.number}: waiting for ${provider.name}`;
+    const modelTag = `${provider.name}/${provider.modelFor('vision')}`;
+    const label = `Chapter ${chapter.number}: waiting for ${modelTag}`;
     await report(0.65 + (attempt - 1) * 0.08, attempt > 1 ? `${label} (retry)` : label);
-    await ctx.log(`Requesting narration for chapter ${chapter.number} — ${images.length} scene image(s), ${scenes.length} scenes · ${provider.name}${attempt > 1 ? ' (coverage retry)' : ''}`);
+    await ctx.log(`Requesting narration for chapter ${chapter.number} — ${images.length} scene image(s), ${scenes.length} scenes · ${modelTag}${attempt > 1 ? ' (coverage retry)' : ''}`);
     const started = Date.now();
     const r = await provider.generateJson<any>({ system: visualStorySystem(opts.language, opts.mode), prompt, images, schema: storySchema, kind: 'vision', signal: ctx.signal, onLog: (m, l) => ctx.log(m, l) });
     const secs = ((Date.now() - started) / 1000).toFixed(1);
     await recordUsage({ owner: ctx.job.owner, project: opts.projectId, job: ctx.job._id as any, provider: r.provider, model: r.model, kind: 'vision', usage: r.usage });
     const tokens = (r.usage?.inputTokens || 0) + (r.usage?.outputTokens || 0) + (r.usage?.thoughtTokens || 0);
-    await ctx.log(`Chapter ${chapter.number}: ${provider.name}/${r.model} responded in ${secs}s — ${tokens.toLocaleString()} tokens, ${r.data?.segments?.length || 0} segment(s)`);
+    await ctx.log(`Chapter ${chapter.number}: ${modelTag} responded in ${secs}s — ${tokens.toLocaleString()} tokens, ${r.data?.segments?.length || 0} segment(s)`);
     if (validCoverage(r.data?.segments || [], scenes.length)) return r.data;
     await ctx.log(`Chapter ${chapter.number}: narration did not cover scenes 1..${scenes.length} exactly once in order — asking the model to correct it`, 'warn');
     prompt = `${base}\n\nIMPORTANT: your previous answer skipped, repeated or reordered scene numbers. Every scene number 1..${scenes.length} must appear exactly once, in order, in contiguous groups, each with non-empty narration.`;
@@ -170,13 +172,13 @@ export const generateRange = async (ctx: JobContext<{ projectId: string; chapter
   const settings = await getSettings(project.owner);
   const aiProvider = (ctx.payload.provider || settings.aiProvider || 'gemini') as 'local' | 'gemini';
   const provider = getVisionProvider(aiProvider);
-  if (!provider.configured) throw new NonRetryableError(`AI provider "${provider.name}" is not configured (missing API key on the server).`, 'AI_NOT_CONFIGURED');
+  if (!provider.configured) throw new NonRetryableError(`AI provider "${provider.name}" is not reachable — start the Python ai-service (:8001) and the free-gemini-api proxy (:8002).`, 'AI_NOT_CONFIGURED');
   const { language, mode } = ctx.payload;
   const chapters = (await MangaChapter.find({ _id: { $in: ctx.payload.chapterIds } })).sort(
     (a, b) => ctx.payload.chapterIds.indexOf(String(a._id)) - ctx.payload.chapterIds.indexOf(String(b._id))
   );
   if (!chapters.length) throw new NonRetryableError('No chapters selected');
-  await ctx.log(`Writing ${mode} narration in ${language} for ${chapters.length} chapter(s): ${chapters.map((c) => c.number).join(', ')} · provider ${provider.name}${ctx.payload.useOcr ? ' · OCR dialogue extraction on' : ''}`);
+  await ctx.log(`Writing ${mode} narration in ${language} for ${chapters.length} chapter(s): ${chapters.map((c) => c.number).join(', ')} · provider ${provider.name}/${provider.modelFor('vision')}${ctx.payload.useOcr ? ' · OCR dialogue extraction on' : ''}`);
 
   await ctx.progress(3, 'Checking scene coverage');
   const noScenes = [];
@@ -205,6 +207,11 @@ export const generateRange = async (ctx: JobContext<{ projectId: string; chapter
     const bandSize = 96 / chapters.length;
     const report: Report = (frac, stage) => ctx.progress(bandStart + frac * bandSize, `Ch ${chapter.number} (${i + 1}/${chapters.length}): ${stage}`);
     await report(0, `preparing (${i + 1}/${chapters.length})`);
+    if (ctx.isRerun && chapter.storyStatus === 'done' && (await StorySegment.exists({ chapter: chapter._id, language, mode }))) {
+      await ctx.log(`Chapter ${chapter.number}: already done — skipping (resuming after retry)`);
+      previousSummary = chapter.summary || previousSummary;
+      continue;
+    }
     chapter.storyStatus = 'processing';
     await chapter.save();
     await emitToUser(chapter.owner, 'chapter:update', serializeChapter(chapter), chapter.project);
@@ -277,7 +284,7 @@ const rewriteSegment = async (ctx: JobContext<{ segmentId: string; action: Rewri
   }
   const ownerSettings = await getSettings(seg.owner);
   const provider = getVisionProvider(ownerSettings.aiProvider === 'local' ? 'local' : 'gemini');
-  if (!provider.configured) throw new NonRetryableError(`AI provider "${provider.name}" is not configured (missing API key on the server).`, 'AI_NOT_CONFIGURED');
+  if (!provider.configured) throw new NonRetryableError(`AI provider "${provider.name}" is not reachable — start the Python ai-service (:8001) and the free-gemini-api proxy (:8002).`, 'AI_NOT_CONFIGURED');
   const project = await MangaProject.findById(seg.project);
   const scenes = await DetectedScene.find({ _id: { $in: seg.scenes } }).sort({ order: 1 });
   const [prev, next] = await Promise.all([
@@ -286,7 +293,7 @@ const rewriteSegment = async (ctx: JobContext<{ segmentId: string; action: Rewri
   ]);
   const language = action === 'translate' ? ctx.payload.language || seg.language : seg.language;
   await ctx.progress(20, `${action} narration`);
-  await ctx.log(`Requesting ${action} for segment ${seg.order} (chapter ${seg.chapterNumber}) · ${provider.name}`);
+  await ctx.log(`Requesting ${action} for segment ${seg.order} (chapter ${seg.chapterNumber}) · ${provider.name}/${provider.modelFor('text')}`);
   const started = Date.now();
   const r = await provider.generateJson<any>({
     system: storySystem(language, seg.mode),

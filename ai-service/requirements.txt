@@ -9,6 +9,9 @@ numpy>=1.26
 # OCR (/ocr) — RapidOCR ONNX; pure-pip, no system Tesseract binary needed
 rapidocr-onnxruntime>=1.4,<2.0
 
+# cloud/proxy story backends (/generate-json, /ocr translation)
+requests>=2.31
+
 # local story generation (/generate-json) — Phi-3.5-vision ONNX, CPU only, no Ollama
 onnxruntime-genai>=0.7,<1.0
 huggingface-hub>=0.24,<1.0

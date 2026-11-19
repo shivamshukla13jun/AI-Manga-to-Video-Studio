@@ -93,7 +93,7 @@ export const ProfilesPanel = () => {
 };
 
 const ProfileForm = ({ saving, providerVoices, onSave }: { saving: boolean; providerVoices: { id: string; name: string; provider: string; languages: string[] }[]; onSave: (b: any) => void }) => {
-  const [f, setF] = useState({ name: '', provider: 'gemini', kind: 'prebuilt', voiceId: '', language: 'hi', description: '' });
+  const [f, setF] = useState({ name: '', provider: 'local', kind: 'prebuilt', voiceId: '', language: 'hi', description: '' });
   const options = providerVoices.filter((v) => v.provider === f.provider);
   return (
     <div className="space-y-2">
@@ -101,7 +101,6 @@ const ProfileForm = ({ saving, providerVoices, onSave }: { saving: boolean; prov
       <div className="grid grid-cols-2 gap-2">
         <Field label="Provider">
           <NativeSelect value={f.provider} onChange={(e) => setF({ ...f, provider: e.target.value, voiceId: '' })}>
-            <option value="gemini">Gemini TTS</option>
             <option value="local">Local TTS</option>
           </NativeSelect>
         </Field>

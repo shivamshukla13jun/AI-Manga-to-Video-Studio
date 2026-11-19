@@ -1,0 +1,112 @@
+{
+  "info": {
+    "name": "free-gemini-api proxy",
+    "description": "Local free Gemini web-session proxy (kodelyx/free-gemini-api) running at http://localhost:8002. Guest worker works with no auth. Set collection var `model` to any vision-capable free model from GET /v1/models (e.g. hydrogen, gemini-3.5-flash-lite, gemini-4-argon).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8002" },
+    { "key": "model", "value": "gemini-3.5-flash-lite" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/health",
+        "description": "Proxy status + cookie pool health."
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "exec": [
+          "pm.test('status 200', () => pm.response.to.have.status(200));",
+          "const b = pm.response.json();",
+          "pm.test('proxy online', () => pm.expect(b.status).to.eql('online'));",
+          "console.log('cookie pool:', JSON.stringify(b.cookie_health));"
+        ], "type": "text/javascript" }
+      }]
+    },
+    {
+      "name": "Workers",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/v1/workers",
+        "description": "Worker pool: guest worker + any Chrome-extension/cookie accounts. Check in_flight / total_errors to debug stuck requests."
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "exec": [
+          "pm.test('status 200', () => pm.response.to.have.status(200));",
+          "const b = pm.response.json();",
+          "pm.test('has an active worker', () => pm.expect(b.active_workers).to.be.above(0));",
+          "console.log('in_flight:', b.total_in_flight, '| workers:', JSON.stringify(b.workers));"
+        ], "type": "text/javascript" }
+      }]
+    },
+    {
+      "name": "Models",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/v1/models",
+        "description": "List of usable model names. Free+vision models are what story generation needs."
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "exec": [
+          "pm.test('status 200', () => pm.response.to.have.status(200));",
+          "const ids = (pm.response.json().data || []).map(m => m.id);",
+          "console.log('models:', ids.join(', '));"
+        ], "type": "text/javascript" }
+      }]
+    },
+    {
+      "name": "Chat Completions (text only)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/v1/chat/completions",
+        "description": "OpenAI-compatible text endpoint. TEXT ONLY — this endpoint does not accept images.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"model\": \"{{model}}\",\n  \"messages\": [\n    { \"role\": \"system\", \"content\": \"You are a test harness. Reply with exactly: PROXY_OK\" },\n    { \"role\": \"user\", \"content\": \"Say the magic word.\" }\n  ],\n  \"temperature\": 0\n}"
+        }
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "exec": [
+          "pm.test('status 200', () => pm.response.to.have.status(200));",
+          "const b = pm.response.json();",
+          "const text = b.choices && b.choices[0] && b.choices[0].message && b.choices[0].message.content;",
+          "console.log('model used:', b.model, '| reply:', text);",
+          "pm.test('got a reply', () => pm.expect(text || '').to.not.be.empty);"
+        ], "type": "text/javascript" }
+      }]
+    },
+    {
+      "name": "Chat Multimodal (image + prompt)",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/chat",
+        "description": "Multipart endpoint that accepts images. In Postman body → form-data: set the `images` key type to File and attach any image. This is the endpoint the ai-service uses for story generation.",
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            { "key": "prompt", "value": "Describe this image in one short sentence.", "type": "text" },
+            { "key": "model", "value": "{{model}}", "type": "text" },
+            { "key": "new_chat", "value": "true", "type": "text" },
+            { "key": "stream", "value": "false", "type": "text" },
+            { "key": "images", "value": "", "type": "file", "description": "Attach any image here — field name MUST be `images` (or `image`), type File" }
+          ]
+        }
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "exec": [
+          "pm.test('status 200', () => pm.response.to.have.status(200));",
+          "const b = pm.response.json();",
+          "console.log('response:', JSON.stringify(b).slice(0, 500));"
+        ], "type": "text/javascript" }
+      }]
+    }
+  ]
+}

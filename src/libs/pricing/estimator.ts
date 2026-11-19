@@ -1,6 +1,5 @@
 import crypto from 'crypto';
 import { Types } from 'mongoose';
-import config from 'config/env';
 import { AppError } from 'middlewares/error';
 import CostEstimate, { ICostEstimateDocument, IEstimateItem } from 'models/cost-estimate.model';
 import UsageRecord from 'models/usage-record.model';
@@ -13,18 +12,7 @@ export const hashParams = (params: Record<string, unknown>) => {
   return crypto.createHash('sha256').update(JSON.stringify(norm(params))).digest('hex');
 };
 
-/**
- * Gemini image tokens: ≤384px on both sides = 258 tokens; otherwise tiled
- * in crop units of floor(min(w,h)/1.5), 258 tokens per tile
- * (ai.google.dev/gemini-api/docs/image-understanding#token-calculation).
- */
-export const imageTokens = (w: number, h: number) => {
-  if (w <= 384 && h <= 384) return 258;
-  const unit = Math.max(1, Math.floor(Math.min(w, h) / 1.5));
-  return Math.ceil(w / unit) * Math.ceil(h / unit) * 258;
-};
-
-/** Rough text tokens when the token-count API is unavailable (Indic scripts tokenize denser). */
+/** Rough text tokens (Indic scripts tokenize denser). */
 export const heuristicTokens = (text: string) => {
   const indic = (text.match(/[\u0900-\u0DFF]/g) || []).length;
   return Math.ceil((text.length - indic) / 4 + indic / 2.2);
@@ -150,5 +138,3 @@ export const serializeEstimate = async (e: ICostEstimateDocument) => {
     isEstimate: true,
   };
 };
-
-export const thinkingFactor = () => (config.GEMINI_THINKING_LEVEL === 'high' || config.GEMINI_THINKING_LEVEL === 'xhigh' ? 1.5 : config.GEMINI_THINKING_LEVEL === 'medium' ? 0.8 : 0.3);

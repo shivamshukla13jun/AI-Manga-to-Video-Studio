@@ -57,16 +57,19 @@ services:
       - TZ=Etc/UTC
     restart: unless-stopped
 
-  # Local AI service (TTS + panel CV + local VLM story generation — no Ollama needed)
-  # local-tts:
-  #   build: ./ai-service
-  #   container_name: manga-studio-local-tts
-  #   profiles: ["local-ai"]
-  #   ports:
-  #     - "8001:8001"
-  #   restart: unless-stopped
-  #   volumes:
-  #     - ./ai-service/voices:/app/voices
+  # free-gemini-api proxy (kodelyx) — story LLM backend for the ai-service.
+  # Build context is the sibling clone; host port 8002 avoids the ai-service on 8001.
+  gemini-api:
+    build:
+      context: ../free-gemini-api/free-gemini-api
+      dockerfile: Dockerfile
+    container_name: free-gemini-api
+    restart: unless-stopped
+    ports:
+      - "8002:8001"
+      - "9226:9226"
+    environment:
+      - TZ=Asia/Kolkata
 
 volumes:
   redis_data:

@@ -178,30 +178,22 @@ const config = {
   JOB_CONCURRENCY_TTS: Number(env("JOB_CONCURRENCY_TTS", "1")),
   JOB_CONCURRENCY_RENDER: Number(env("JOB_CONCURRENCY_RENDER", "1")),
 
-  // Gemini (server-side only — never sent to the frontend)
-  GEMINI_API_KEY: env("GEMINI_API_KEY"),
-  GEMINI_API_BASE: env("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta"),
-  GEMINI_API_REVISION: env("GEMINI_API_REVISION", "2026-05-20"),
-  GEMINI_VISION_MODEL: env("GEMINI_VISION_MODEL", "gemini-3.8-flash"),
-  GEMINI_STORY_MODEL: env("GEMINI_STORY_MODEL", "gemini-3.8-flash"),
-  // Ordered fallback chains (comma-separated, best → cheapest). When a model
-  // returns 429/404 it is cooled down and the next model in the chain is tried.
-  GEMINI_VISION_MODELS: env("GEMINI_VISION_MODELS", env("GEMINI_VISION_MODEL", "gemini-3.8-flash")),
-  GEMINI_STORY_MODELS: env("GEMINI_STORY_MODELS", env("GEMINI_STORY_MODEL", "gemini-3.8-flash")),
-  GEMINI_TTS_MODELS: env("GEMINI_TTS_MODELS", `${env("GEMINI_TTS_MODEL", "gemini-3.8-flash-tts")},${env("GEMINI_TTS_LITE_MODEL", "gemini-3.8-flash-lite-tts")}`),
-  GEMINI_THINKING_LEVEL: env("GEMINI_THINKING_LEVEL", "high"),
-  GEMINI_TTS_MODEL: env("GEMINI_TTS_MODEL", "gemini-3.8-flash-tts"),
-  GEMINI_TTS_LITE_MODEL: env("GEMINI_TTS_LITE_MODEL", "gemini-3.8-flash-lite-tts"),
-  GEMINI_TIMEOUT_MS: Number(env("GEMINI_TIMEOUT_MS", "180000")),
-  GEMINI_FILES_API: env("GEMINI_FILES_API", "true"),
-  GEMINI_MAX_IMAGES_PER_CALL: Number(env("GEMINI_MAX_IMAGES_PER_CALL", "24")),
+  // AI calls run through the local ai-service / free-gemini-api proxy — no paid API
   AI_TILE_HEIGHT: Number(env("AI_TILE_HEIGHT", "2400")),
   AI_TILE_OVERLAP: Number(env("AI_TILE_OVERLAP", "300")),
+  LOCAL_HTTP_TIMEOUT_MS: Number(env("LOCAL_HTTP_TIMEOUT_MS", "180000")),
 
   // Optional local inference service (ai-service/) — TTS, panel CV and local VLM story generation
-  LOCAL_TTS_URL: env("LOCAL_TTS_URL", "http://127.0.0.1:8001"),
-  PANEL_DETECT_URL: env("PANEL_DETECT_URL", env("LOCAL_TTS_URL", "http://127.0.0.1:8001")),
+  LOCAL_TTS_URL: env("LOCAL_TTS_URL", "http://127.0.0.1:8003"),
+  PANEL_DETECT_URL: env("PANEL_DETECT_URL", env("LOCAL_TTS_URL", "http://127.0.0.1:8003")),
   LOCAL_STORY_MODEL: env("LOCAL_STORY_MODEL", "microsoft/Phi-3.5-vision-instruct-onnx"),
+  // Shared with the Python ai-service — 'freegemini' routes all vision/story calls
+  // through the free-gemini-api proxy (ai-service /generate-json → proxy /chat)
+  STORY_LLM_KIND: env("STORY_LLM_KIND", "openai"),
+  STORY_LLM_BASE_URL: env("STORY_LLM_BASE_URL", ""),
+  STORY_LLM_MODEL: env("STORY_LLM_MODEL", ""),
+  // ms; 0 = wait forever for the LLM backend (proxy latency is unpredictable)
+  STORY_LLM_TIMEOUT_MS: Number(env("STORY_LLM_TIMEOUT_MS", "0")),
 
   // Media tooling
   FFMPEG_PATH: env("FFMPEG_PATH", "ffmpeg"),

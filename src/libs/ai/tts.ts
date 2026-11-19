@@ -1,12 +1,12 @@
 import config from 'config/env';
 import { AppError } from 'middlewares/error';
 import { NonRetryableError } from 'libs/jobs/runner';
-import { createInteraction, geminiConfigured, InteractionUsage } from './gemini.client';
+import { InteractionUsage } from './provider';
 
 export interface TtsVoice {
   id: string;
   name: string;
-  provider: 'gemini' | 'local';
+  provider: 'local';
   engine?: string;
   languages: string[];
   gender?: string;
@@ -20,11 +20,11 @@ export interface SpeakResult {
   mimeType: string;
   usage: InteractionUsage;
   model: string;
-  provider: 'gemini' | 'local';
+  provider: 'local';
 }
 
 export interface TtsProvider {
-  readonly name: 'gemini' | 'local';
+  readonly name: 'local';
   readonly configured: boolean;
   /** remote probe of an optional service — cached briefly so page loads stay fast */
   status(): Promise<{ ok: boolean; detail?: string }>;
@@ -34,112 +34,7 @@ export interface TtsProvider {
   replicateVoice?(req: { name: string; referenceWav: Buffer; consentWav: Buffer; language: string; signal?: AbortSignal }): Promise<{ voiceId: string }>;
 }
 
-/** Gemini 3.8 prebuilt voices (from the TTS docs). Marked clearly as prebuilt. */
-export const GEMINI_PREBUILT_VOICES: { id: string; name: string; description: string }[] = [
-  { id: 'Zephyr', name: 'Zephyr', description: 'Bright' },
-  { id: 'Puck', name: 'Puck', description: 'Upbeat' },
-  { id: 'Charon', name: 'Charon', description: 'Informative' },
-  { id: 'Kore', name: 'Kore', description: 'Firm' },
-  { id: 'Fenrir', name: 'Fenrir', description: 'Excitable' },
-  { id: 'Leda', name: 'Leda', description: 'Youthful' },
-  { id: 'Orus', name: 'Orus', description: 'Firm' },
-  { id: 'Aoede', name: 'Aoede', description: 'Breezy' },
-  { id: 'Callirrhoe', name: 'Callirrhoe', description: 'Easy-going' },
-  { id: 'Autonoe', name: 'Autonoe', description: 'Bright' },
-  { id: 'Enceladus', name: 'Enceladus', description: 'Breathy' },
-  { id: 'Iapetus', name: 'Iapetus', description: 'Clear' },
-  { id: 'Umbriel', name: 'Umbriel', description: 'Easy-going' },
-  { id: 'Algieba', name: 'Algieba', description: 'Smooth' },
-  { id: 'Despina', name: 'Despina', description: 'Smooth' },
-  { id: 'Erinome', name: 'Erinome', description: 'Clear' },
-  { id: 'Algenib', name: 'Algenib', description: 'Gravelly' },
-  { id: 'Rasalgethi', name: 'Rasalgethi', description: 'Informative' },
-  { id: 'Laomedeia', name: 'Laomedeia', description: 'Upbeat' },
-  { id: 'Achernar', name: 'Achernar', description: 'Soft' },
-  { id: 'Alnilam', name: 'Alnilam', description: 'Firm' },
-  { id: 'Schedar', name: 'Schedar', description: 'Even' },
-  { id: 'Gacrux', name: 'Gacrux', description: 'Mature' },
-  { id: 'Pulcherrima', name: 'Pulcherrima', description: 'Forward' },
-  { id: 'Achird', name: 'Achird', description: 'Friendly' },
-  { id: 'Zubenelgenubi', name: 'Zubenelgenubi', description: 'Casual' },
-  { id: 'Vindemiatrix', name: 'Vindemiatrix', description: 'Gentle' },
-  { id: 'Sadachbia', name: 'Sadachbia', description: 'Lively' },
-  { id: 'Sadaltager', name: 'Sadaltager', description: 'Knowledgeable' },
-  { id: 'Sulafat', name: 'Sulafat', description: 'Warm' },
-];
-
-const ttsUsage = (u: InteractionUsage): InteractionUsage => u;
-
-/** Ordered TTS fallback chain: flash-tts → lite-tts (or GEMINI_TTS_MODELS). */
-const ttsModels = (): string[] =>
-  (config.GEMINI_TTS_MODELS as string).split(',').map((m) => m.trim()).filter(Boolean);
-
-class GeminiTts implements TtsProvider {
-  readonly name = 'gemini' as const;
-  get configured() {
-    return geminiConfigured();
-  }
-  async status() {
-    return this.configured ? { ok: true } : { ok: false, detail: 'GEMINI_API_KEY not set on the server' };
-  }
-  async listVoices(): Promise<TtsVoice[]> {
-    return GEMINI_PREBUILT_VOICES.map((v) => ({
-      id: v.id,
-      name: v.name,
-      provider: 'gemini',
-      languages: ['hi', 'en'],
-      description: v.description,
-    }));
-  }
-  async speak(req: { text: string; voiceId: string; language: string; speed?: number; signal?: AbortSignal; onLog?: (message: string, level?: 'info' | 'warn' | 'error') => void | Promise<void> }): Promise<SpeakResult> {
-    // Interactions API: request an audio response with a prebuilt voice.
-    // NOTE: verify the exact speech_config field names against the live API
-    // when a key is available — the mock server tolerates the whole payload.
-    const r = await createInteraction({
-      model: ttsModels(),
-      input: [{ type: 'text', text: req.text }],
-      generationConfig: {
-        response_modalities: ['AUDIO'],
-        speech_config: {
-          voice_config: { prebuilt_voice_config: { voice_name: req.voiceId } },
-          language_code: req.language,
-          ...(req.speed && req.speed !== 1 ? { speaking_rate: req.speed } : {}),
-        },
-      },
-      signal: req.signal,
-      onLog: req.onLog,
-    });
-    if (!r.audio?.data) throw new Error('Gemini TTS returned no audio');
-    return { audio: Buffer.from(r.audio.data, 'base64'), mimeType: r.audio.mimeType || 'audio/wav', usage: ttsUsage(r.usage), model: r.model, provider: 'gemini' };
-  }
-  async replicateVoice(req: { name: string; referenceWav: Buffer; consentWav: Buffer; language: string; signal?: AbortSignal }): Promise<{ voiceId: string }> {
-    // Voice replication on Gemini requires the account to have the feature
-    // enabled. Attempt the documented call; surface the provider error clearly.
-    try {
-      const r = await createInteraction({
-        model: config.GEMINI_TTS_MODEL as string,
-        input: [
-          { type: 'text', text: `Create a reusable voice profile named "${req.name}". The second audio sample is an explicit consent statement from the speaker. Return the voice id.` },
-          { type: 'audio', data: req.referenceWav.toString('base64'), mime_type: 'audio/wav' },
-          { type: 'audio', data: req.consentWav.toString('base64'), mime_type: 'audio/wav' },
-        ],
-        responseFormat: { type: 'voice_profile' } as any,
-        signal: req.signal,
-      });
-      const voiceId = (r.raw?.voice_profile?.id || r.raw?.voiceProfile?.name || r.json?.voiceId || '') as string;
-      if (!voiceId) throw new Error('provider returned no voice id');
-      return { voiceId };
-    } catch (e: any) {
-      if (e instanceof NonRetryableError || e instanceof AppError) throw e;
-      throw new NonRetryableError(
-        `Voice replication is not available for this account/API access (${e.message}). Use a prebuilt voice or a local TTS engine.`,
-        'VOICE_CLONE_UNSUPPORTED'
-      );
-    }
-  }
-}
-
-/** Optional Python inference service (ai-service/) hosting Piper/Kokoro/XTTS. */
+/** Python inference service (ai-service/) hosting Piper/Kokoro/XTTS — the only TTS path. */
 class LocalTts implements TtsProvider {
   readonly name = 'local' as const;
   get configured() {
@@ -148,7 +43,7 @@ class LocalTts implements TtsProvider {
   private async call(path: string, init?: RequestInit): Promise<Response> {
     const res = await fetch(`${config.LOCAL_TTS_URL}${path}`, {
       ...init,
-      signal: init?.signal || AbortSignal.timeout(config.GEMINI_TIMEOUT_MS),
+      signal: init?.signal || AbortSignal.timeout(config.LOCAL_HTTP_TIMEOUT_MS),
     });
     return res;
   }
@@ -194,7 +89,7 @@ class LocalTts implements TtsProvider {
   }
 }
 
-const ttsProviders: Record<string, TtsProvider> = { gemini: new GeminiTts(), local: new LocalTts() };
+const ttsProviders: Record<string, TtsProvider> = { local: new LocalTts() };
 
 export const getTtsProvider = (name: string): TtsProvider => {
   const p = ttsProviders[name];

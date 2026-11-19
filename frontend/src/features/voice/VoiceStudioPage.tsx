@@ -6,11 +6,10 @@ import { Button } from '@/components/ui/button';
 import { Badge, Checkbox, Slider, Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/primitives';
 import { Input, NativeSelect } from '@/components/ui/input';
 import { EmptyState, JobErrorBanner, LoadingState, PageHeader } from '@/components/common/states';
-import { useAction, useJobs, useProjectAudio, useProjects, useSegments, useStudioSettings, useVoices, useVoiceStatus, voiceApi } from '@/lib/queries';
+import { useAction, useJobs, useProjectAudio, useProjects, useSegments, useVoices, useVoiceStatus, voiceApi } from '@/lib/queries';
 import { useProjectRoom } from '@/lib/socket';
 import { formatCost, formatDuration } from '@/lib/utils';
-import type { CostEstimate, GeneratedAudio, StorySegment } from '@/lib/types';
-import { EstimateDialog } from '../story/EstimateDialog';
+import type { GeneratedAudio, StorySegment } from '@/lib/types';
 import { ProfilesPanel } from './ProfilesPanel';
 import { Waveform } from './Waveform';
 
@@ -72,7 +71,6 @@ const Studio = ({ projectId }: { projectId: string }) => {
   useProjectRoom(projectId);
   const status = useVoiceStatus();
   const voices = useVoices();
-  const settings = useStudioSettings();
   const [language, setLanguage] = useState('hi');
   const [mode, setMode] = useState('recap');
   const segments = useSegments(projectId, language, mode);
@@ -80,18 +78,13 @@ const Studio = ({ projectId }: { projectId: string }) => {
   const ttsJobs = useJobs({ project: projectId });
   const failedTts = (ttsJobs.data || []).find((j) => j.type === 'tts-generation' && j.status === 'failed');
 
-  const [provider, setProvider] = useState<'gemini' | 'local'>('gemini');
+  const provider = 'local' as const;
   const [voiceId, setVoiceId] = useState('');
   const [speed, setSpeed] = useState(1);
   const [previewText, setPreviewText] = useState('नमस्ते! यह आवाज़ का नमूना है।');
   const [previewing, setPreviewing] = useState(false);
   const previewEl = useRef<HTMLAudioElement>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [estimate, setEstimate] = useState<CostEstimate | null>(null);
-
-  useEffect(() => {
-    if (settings.data?.defaultTtsProvider) setProvider(settings.data.defaultTtsProvider);
-  }, [settings.data?.defaultTtsProvider]);
 
   const providerVoices = useMemo(
     () => [
@@ -113,7 +106,6 @@ const Studio = ({ projectId }: { projectId: string }) => {
   }, [audio.data]);
   const chosen = selected.size ? list.filter((s) => selected.has(s.id)) : list;
   const chosenIds = chosen.map((s) => s.id);
-  const cloud = provider === 'gemini';
 
   const preview = async () => {
     setPreviewing(true);
@@ -128,18 +120,10 @@ const Studio = ({ projectId }: { projectId: string }) => {
     }
   };
 
-  const estimateMut = useAction(
-    async () => {
-      if (!cloud) return runGenerate(undefined);
-      setEstimate(await voiceApi.estimate({ projectId, segmentIds: chosenIds, provider, voiceId, speed }));
-    },
-    {}
-  );
-  const runGenerate = async (estimateId?: string) => {
+  const runGenerate = async () => {
     try {
-      const r = await voiceApi.generate({ projectId, segmentIds: chosenIds, provider, voiceId, speed, estimateId });
+      const r = await voiceApi.generate({ projectId, segmentIds: chosenIds, provider, voiceId, speed });
       toast.success(`${r.audio.length} clip(s) queued`);
-      setEstimate(null);
       audio.refetch();
     } catch (e: any) {
       toast.error(e.message);
@@ -149,7 +133,7 @@ const Studio = ({ projectId }: { projectId: string }) => {
   const del = useAction((id: string) => voiceApi.deleteAudio(id), { success: 'Clip deleted', onSuccess: () => audio.refetch() });
 
   const st = status.data?.providers;
-  const ready = list.length > 0 && voiceId && (cloud ? st?.gemini?.ok : st?.local?.ok);
+  const ready = list.length > 0 && voiceId && st?.local?.ok;
 
   return (
     <div className="flex h-full flex-col">
@@ -159,13 +143,8 @@ const Studio = ({ projectId }: { projectId: string }) => {
         </div>
         <span className="flex-1" />
         <div className="flex items-center gap-1.5 text-[10px]">
-          <Badge tone={st?.gemini?.ok ? 'ok' : 'danger'}>Gemini {st?.gemini?.ok ? 'ready' : 'off'}</Badge>
-          <span title={st?.local?.detail}><Badge tone={st?.local?.ok ? 'ok' : 'warn'}>Local {st?.local?.ok ? 'ready' : 'off'}</Badge></span>
+          <span title={st?.local?.detail}><Badge tone={st?.local?.ok ? 'ok' : 'warn'}>Local TTS {st?.local?.ok ? 'ready' : 'off'}</Badge></span>
         </div>
-        <NativeSelect value={provider} onChange={(e) => { setProvider(e.target.value as 'gemini' | 'local'); }} className="h-7 w-28 text-xs">
-          <option value="gemini">Gemini TTS</option>
-          <option value="local">Local TTS</option>
-        </NativeSelect>
         <NativeSelect value={voiceId} onChange={(e) => setVoiceId(e.target.value)} className="h-7 w-44 text-xs">
           {!providerVoices.length && <option value="">no voices</option>}
           {providerVoices.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
@@ -264,8 +243,8 @@ const Studio = ({ projectId }: { projectId: string }) => {
             {chosen.length} clip(s) · {chosen.reduce((n, s) => n + s.wordCount, 0)} words · ≈{formatDuration(chosen.reduce((n, s) => n + s.estimatedDuration, 0) / speed)} narration
           </span>
           <span className="flex-1" />
-          <Button variant="primary" size="sm" disabled={!ready || estimateMut.isPending} onClick={() => estimateMut.mutate()}>
-            <AudioLines /> {cloud ? 'Estimate & generate' : 'Generate (local, free)'}
+          <Button variant="primary" size="sm" disabled={!ready} onClick={runGenerate}>
+            <AudioLines /> Generate (local, free)
           </Button>
         </div>
       )}
@@ -273,21 +252,9 @@ const Studio = ({ projectId }: { projectId: string }) => {
       {!ready && (
         <div className="flex items-center gap-2 border-t border-warn/30 bg-warn/10 px-4 py-2 text-xs text-warn">
           <TriangleAlert className="size-3.5" />
-          {provider === 'gemini' && !st?.gemini?.ok
-            ? 'Gemini is not configured — set GEMINI_API_KEY on the server, or switch to a local engine.'
-            : provider === 'local' && !st?.local?.ok
-              ? `Local TTS is offline (${st?.local?.detail || 'start ai-service'})`
-              : 'Pick a voice to generate.'}
+          {!st?.local?.ok ? `Local TTS is offline (${st?.local?.detail || 'start ai-service'})` : 'Pick a voice to generate.'}
         </div>
       )}
-
-      <EstimateDialog
-        estimate={estimate}
-        open={!!estimate}
-        onOpenChange={(o) => !o && setEstimate(null)}
-        confirmLabel={`Generate ${chosen.length} clip(s)`}
-        onConfirm={() => runGenerate(estimate!.id)}
-      />
     </div>
   );
 };

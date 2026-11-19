@@ -8,8 +8,7 @@ import { EmptyState, JobErrorBanner, JobStatusBadge, LoadingState, PageHeader } 
 import { mangaApi, storyApi, useAction, useJobs, useProjects, useStoryOverview, useStudioSettings, useVideos, videoApi } from '@/lib/queries';
 import { useProjectRoom } from '@/lib/socket';
 import { formatDuration } from '@/lib/utils';
-import type { Chapter, CostEstimate, Job } from '@/lib/types';
-import { EstimateDialog } from './EstimateDialog';
+import type { Chapter, Job } from '@/lib/types';
 import { SceneEditor } from './SceneEditor';
 import { NarrationEditor } from './NarrationEditor';
 import { CharactersPanel } from './CharactersPanel';
@@ -99,10 +98,8 @@ const Studio = ({ projectId }: { projectId: string }) => {
   const language = studioSettings.data?.narrationLanguage || 'hi';
   const mode = studioSettings.data?.narrationMode || 'recap';
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [estimate, setEstimate] = useState<CostEstimate | null>(null);
   const [runMode, setRunMode] = useState<'queue' | 'direct'>('queue');
-  const [useOcr, setUseOcr] = useState(false);
-  const [, setEstimateAction] = useState<'detect' | 'story'>('story');
+  const [useOcr, setUseOcr] = useState(true);
   const navigate = useNavigate();
 
   useProjectRoom(projectId);
@@ -115,7 +112,6 @@ const Studio = ({ projectId }: { projectId: string }) => {
     .filter(Boolean) as Job[];
 
   const chapters = overview.data?.chapters || [];
-  const aiProvider = (overview.data?.aiProvider || studioSettings.data?.aiProvider || 'gemini') as 'gemini' | 'local';
   const mergedUnits = chapters.filter((c: any) => c.kind === 'merged');
   const readyChapters = chapters.filter((c) => c.status === 'ready');
   const readyMerged = mergedUnits.filter((c) => c.status === 'ready');
@@ -128,36 +124,19 @@ const Studio = ({ projectId }: { projectId: string }) => {
   // Detection always runs on the Python CV service — free, no estimate needed.
   const runDetect = useAction(async () => storyApi.detect(projectId, chosenIds, {}), {
     success: 'Scene detection queued — watch progress in Render Manager',
-    onSuccess: () => { setEstimate(null); overview.refetch(); aiJobs.refetch(); },
+    onSuccess: () => { overview.refetch(); aiJobs.refetch(); },
   });
   const detectClick = () => runDetect.mutate();
 
-  const estimateMut = useAction(
-    async () => { setEstimateAction('story'); setEstimate(await storyApi.estimateStory(projectId, chosenIds, language, mode)); },
-    {}
-  );
+  // Story generation is free (local ai-service → free-gemini-api proxy) — no estimate gate.
   const runGenerate = useAction(
-    async (estimateId?: string) => storyApi.generate(projectId, chosenIds, language, mode, estimateId, { direct: runMode === 'direct', useOcr }),
+    async () => storyApi.generate(projectId, chosenIds, language, mode, undefined, { direct: runMode === 'direct', useOcr }),
     {
       success: (r: any) => (r?.result ? `Narration written — ${r.result.segments} segments` : 'Story generation queued — watch progress in Render Manager'),
-      onSuccess: () => { setEstimate(null); overview.refetch(); aiJobs.refetch(); },
+      onSuccess: () => { overview.refetch(); aiJobs.refetch(); },
     }
   );
-  const generateClick = () => (aiProvider === 'local' ? runGenerate.mutate() : estimateMut.mutate());
-  const runJob = useAction(
-    async () => {
-      if (!estimate) return;
-      await storyApi.generate(projectId, chosenIds, language, mode, estimate.id, { direct: runMode === 'direct', useOcr });
-    },
-    {
-      success: 'Job queued — watch progress in Render Manager',
-      onSuccess: () => {
-        setEstimate(null);
-        overview.refetch();
-        aiJobs.refetch();
-      },
-    }
-  );
+  const generateClick = () => runGenerate.mutate();
 
   // Merge selected (or all ready) source chapters into ≤50MB PDF special-chapter units.
   const mergeMut = useAction(
@@ -206,7 +185,7 @@ const Studio = ({ projectId }: { projectId: string }) => {
         </div>
         <span className="flex-1" />
         <Link to="/settings" title="Global narration + AI provider settings">
-          <Badge tone="neutral" className="cursor-pointer">{LANGUAGES.find(([v]) => v === language)?.[1] || language} · {mode === 'recap' ? 'Recap' : 'Original'} · {aiProvider === 'local' ? 'Local AI' : 'Gemini'}</Badge>
+          <Badge tone="neutral" className="cursor-pointer">{LANGUAGES.find(([v]) => v === language)?.[1] || language} · {mode === 'recap' ? 'Recap' : 'Original'} · Local AI</Badge>
         </Link>
         <Button
           size="sm"
@@ -235,16 +214,16 @@ const Studio = ({ projectId }: { projectId: string }) => {
           <option value="queue">Run in background</option>
           <option value="direct">Run direct (see errors)</option>
         </NativeSelect>
-        <label className="flex items-center gap-1.5 text-xs text-muted" title="Extract speech-bubble text from scene images with local OCR and feed it into the prompt">
+        <label className="flex items-center gap-1.5 text-xs text-muted" title="Extract speech-bubble text from scene images with local OCR, translate to Hindi (Latin script), and feed it into the prompt">
           <Checkbox checked={useOcr} onCheckedChange={(v) => setUseOcr(v === true)} />
-          OCR text
+          OCR text + Hindi
         </label>
         <Button
           size="sm"
           variant="primary"
-          disabled={!ov.aiConfigured || !hasScenes || estimateMut.isPending || runGenerate.isPending}
+          disabled={!ov.aiConfigured || !hasScenes || runGenerate.isPending}
           onClick={generateClick}
-          title={aiProvider === 'local' ? 'Generate narration with the local AI service — free' : 'Generate narration with Gemini — shows cost estimate first'}
+          title="Generate narration — free (local ai-service → free-gemini-api proxy)"
         >
           <Sparkles /> {runGenerate.isPending ? 'Generating…' : 'Generate story'}
         </Button>
@@ -252,7 +231,7 @@ const Studio = ({ projectId }: { projectId: string }) => {
 
       {!ov.aiConfigured && (
         <div className="flex items-center gap-2 border-b border-warn/30 bg-warn/10 px-4 py-2 text-xs text-warn">
-          <TriangleAlert className="size-3.5" /> No AI API key configured on the server (GEMINI_API_KEY). Story generation will fail until it is set (scene detection is local CV — unaffected).
+          <TriangleAlert className="size-3.5" /> AI service not reachable — start the Python ai-service (:8001) and the free-gemini-api proxy (:8002). Story generation will fail until then (scene detection is local CV — unaffected).
         </div>
       )}
       {!mergedUnits.length && readySources.length > 0 && (
@@ -350,15 +329,6 @@ const Studio = ({ projectId }: { projectId: string }) => {
           )}
         </main>
       </div>
-
-      <EstimateDialog
-        estimate={estimate}
-        open={!!estimate}
-        onOpenChange={(o) => !o && setEstimate(null)}
-        confirmLabel="Generate narration"
-        loading={runJob.isPending}
-        onConfirm={() => runJob.mutate()}
-      />
     </div>
   );
 };

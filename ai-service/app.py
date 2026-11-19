@@ -24,7 +24,7 @@ Endpoints:
                            2) local vision-language model via onnxruntime-genai
                               (Phi-3.5-vision ONNX int4; LOCAL_STORY_MODEL / _DIR / _SUBDIR)
 
-Run:  pip install -r requirements.txt && uvicorn app:app --port 8001
+Run:  pip install -r requirements.txt && uvicorn app:app --port 8003
 """
 import base64
 import hashlib
@@ -276,6 +276,9 @@ STORY_LLM_BASE_URL = os.environ.get("STORY_LLM_BASE_URL", "").rstrip("/")
 STORY_LLM_API_KEY = os.environ.get("STORY_LLM_API_KEY", "")
 STORY_LLM_MODEL = os.environ.get("STORY_LLM_MODEL", "openai/gpt-4o-mini")
 STORY_LLM_MAX_IMAGES = int(os.environ.get("STORY_LLM_MAX_IMAGES", "0") or "0")  # 0 = all images
+# 'openai' = OpenAI-compatible /chat/completions; 'freegemini' = kodelyx/free-gemini-api
+# proxy (Gemini web session pool) — images via multipart POST {root}/chat
+STORY_LLM_KIND = os.environ.get("STORY_LLM_KIND", "openai")
 
 LOCAL_STORY_MODEL = os.environ.get("LOCAL_STORY_MODEL", "microsoft/Phi-3.5-vision-instruct-onnx")
 LOCAL_STORY_MODEL_DIR = os.environ.get("LOCAL_STORY_MODEL_DIR", "")
@@ -404,7 +407,7 @@ def _cloud_chat(body: dict) -> dict:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=600) as r:
+        with urllib.request.urlopen(req, timeout=None) as r:
             return _json.loads(r.read())
     except urllib.error.HTTPError as e:
         detail = e.read().decode()[:400]
@@ -450,11 +453,61 @@ def _cloud_generate_json(system: str, prompt: str, schema: dict, images: list[di
     }
 
 
+def _proxy_generate_json(system: str, prompt: str, schema: dict, images: list[dict]) -> dict:
+    """kodelyx/free-gemini-api proxy — Gemini web session pool, no API key.
+    Images go as multipart 'images' files; filenames carry the SCENE labels."""
+    import requests
+
+    root = STORY_LLM_BASE_URL[: -len("/v1")] if STORY_LLM_BASE_URL.endswith("/v1") else STORY_LLM_BASE_URL
+    text = "\n\n".join(p for p in [
+        system,
+        prompt,
+        f"Respond ONLY with one JSON object matching this schema (no markdown fences, no commentary):\n{_json.dumps(schema)}" if schema else "",
+    ] if p)
+    decoded = (images or [])[: STORY_LLM_MAX_IMAGES or len(images or [])]
+    files = [
+        ("images", (
+            (img.get("label") or f"scene_{i}").replace(" ", "_").replace("·", "-") + ".jpg",
+            base64.b64decode(img["data"]),
+            img.get("mimeType") or "image/jpeg",
+        ))
+        for i, img in enumerate(decoded)
+    ]
+    try:
+        resp = requests.post(
+            f"{root}/chat",
+            data={"prompt": text, "model": STORY_LLM_MODEL, "new_chat": "true", "stream": "false"},
+            files=files or None,
+            timeout=None,
+        )
+    except Exception as e:
+        raise RuntimeError(f"free-gemini-api proxy unreachable at {root}: {e}")
+    if resp.status_code != 200:
+        detail = resp.text[:400]
+        raise RuntimeError(f"free-gemini-api proxy {resp.status_code}{' (rate-limited/down — retryable)' if resp.status_code == 429 or resp.status_code >= 500 else ''}: {detail}")
+    try:
+        j = resp.json()
+    except Exception:
+        raise RuntimeError(f"free-gemini-api proxy returned non-JSON: {resp.text[:200]}")
+    if j.get("error"):
+        raise RuntimeError(f"free-gemini-api proxy error: {j['error']}")
+    raw = j.get("text") or ""
+    if not raw:
+        raise RuntimeError("free-gemini-api proxy returned empty text — is a Gemini account connected via the Chrome extension?")
+    return {
+        "data": _extract_json(raw),
+        "model": f"{STORY_LLM_MODEL}@freegemini",
+        "usage": {"inputTokens": 0, "outputTokens": max(1, len(raw) // 4)},
+    }
+
+
 def _local_generate_json(system: str, prompt: str, schema: dict, images: list[dict]) -> dict:
     """Grounded story JSON. Cloud endpoint when STORY_LLM_BASE_URL is set;
     else fully in-process: ≤ MAX_INLINE_IMAGES → single multimodal call, more →
     caption each scene first then a text-only compose call (captions cached)."""
     if STORY_LLM_BASE_URL:
+        if STORY_LLM_KIND == "freegemini":
+            return _proxy_generate_json(system, prompt, schema, images)
         return _cloud_generate_json(system, prompt, schema, images)
     decoded = []
     for img in images or []:
@@ -532,11 +585,35 @@ def _ocr_engine():
 
 class OcrRequest(BaseModel):
     images: list[str]  # base64-encoded image bytes
+    translate_to: Optional[str] = None  # e.g. "hi-roman" → Hindi in Latin script
+
+
+def _translate_lines(texts: list[str], target: str) -> tuple[list[str], bool]:
+    """One cloud call translating the whole OCR batch. Falls back to originals."""
+    if not texts or not STORY_LLM_BASE_URL:
+        return texts, False
+    roman = " written in LATIN script (romanized, e.g. 'aaj kya hua', NOT Devanagari)" if "roman" in target else ""
+    lang = "Hindi" if target.startswith("hi") else target
+    prompt = (
+        f"Translate each manga dialogue line into {lang}{roman}. Keep names and sound-effects readable. "
+        f'Return ONLY JSON {{"translations": [...]}} — same order and count as input.\n{_json.dumps(texts, ensure_ascii=False)}'
+    )
+    try:
+        resp = _cloud_chat({"model": STORY_LLM_MODEL, "messages": [{"role": "user", "content": prompt}], "temperature": 0.2, "max_tokens": 2048})
+        text = (resp.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+        arr = _extract_json(text).get("translations") or []
+        out = [str(t) for t in arr]
+        if len(out) != len(texts):
+            return texts, False
+        return out, True
+    except Exception:
+        return texts, False
 
 
 @app.post("/ocr")
 def ocr(req: OcrRequest):
-    """Extract text lines from scene crops — dialogue for story grounding."""
+    """Extract text lines from scene crops — dialogue for story grounding.
+    translate_to adds a romanized translation per line via one cloud call."""
     try:
         engine = _ocr_engine()
         import numpy as np
@@ -548,7 +625,16 @@ def ocr(req: OcrRequest):
             det, _ = engine(img)
             lines = [{"text": t, "confidence": round(float(c), 3)} for _, t, c in (det or [])]
             results.append({"lines": lines})
-        return {"results": results}
+        translated = False
+        if req.translate_to:
+            flat = [l["text"] for r in results for l in r["lines"]]
+            out, translated = _translate_lines(flat, req.translate_to)
+            i = 0
+            for r in results:
+                for l in r["lines"]:
+                    l["translated"] = out[i]
+                    i += 1
+        return {"results": results, "translated": translated}
     except RuntimeError as e:
         raise HTTPException(503, str(e))
     except Exception as e:
@@ -578,7 +664,8 @@ async def detect_panels(request: Request):
 # ----------------------------------------------------------------- routes
 def _story_model_status() -> str:
     if STORY_LLM_BASE_URL:
-        return f"cloud endpoint {STORY_LLM_BASE_URL} (model {STORY_LLM_MODEL})"
+        kind = "free-gemini-api proxy" if STORY_LLM_KIND == "freegemini" else "cloud endpoint"
+        return f"{kind} {STORY_LLM_BASE_URL} (model {STORY_LLM_MODEL})"
     try:
         import onnxruntime_genai  # noqa: F401
     except ImportError:
@@ -642,4 +729,4 @@ def tts(req: SpeakRequest):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("LOCAL_TTS_PORT", "8001")))
+    uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("LOCAL_TTS_PORT", "8003")))

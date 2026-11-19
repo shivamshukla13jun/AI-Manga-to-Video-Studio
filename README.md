@@ -221,7 +221,7 @@ npm run dev                        # API :3000 (workers run in-process)
 cd frontend && npm run dev         # UI  :5173
 ```
 
-Requires Node.js, MongoDB, Redis, RabbitMQ and ffmpeg on the host (see `docker-compose.yml` for Redis/RabbitMQ; no Node/Mongo containers by design). Optional local TTS: `docker compose --profile local-ai up -d local-tts` or `pip install -r ai-service/requirements.txt && uvicorn app:app --port 8001`.
+Requires Node.js, MongoDB, Redis, RabbitMQ and ffmpeg on the host (see `docker-compose.yml` for Redis/RabbitMQ; no Node/Mongo containers by design). Optional local TTS: `docker compose --profile local-ai up -d local-tts` or `pip install -r ai-service/requirements.txt && uvicorn app:app --port 8003`.
 
 Rendering uses Remotion (`video-renderer/` project) + FFmpeg. Headless Chrome is downloaded automatically on first render unless `RENDER_BROWSER_EXECUTABLE` is set. Segment checkpoints land in `RENDER_CHECKPOINT_DIR` so retries resume mid-render.
 

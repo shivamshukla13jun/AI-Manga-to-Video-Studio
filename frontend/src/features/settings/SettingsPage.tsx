@@ -12,7 +12,7 @@ import { formatCost, formatDate } from '@/lib/utils';
 export const SettingsPage = () => {
   const settings = useStudioSettings();
   const pricing = usePriceTable();
-  const [f, setF] = useState({ budgetLimitUSD: '', confirmAboveUSD: '', displayCurrency: 'INR', pricingTier: 'standard', aiProvider: 'gemini', defaultTtsProvider: 'local', narrationLanguage: 'hi', narrationMode: 'recap', wpmDefault: '', wpmHi: '', wpmEn: '' });
+  const [f, setF] = useState({ budgetLimitUSD: '', confirmAboveUSD: '', displayCurrency: 'INR', pricingTier: 'standard', aiProvider: 'local', defaultTtsProvider: 'local', narrationLanguage: 'hi', narrationMode: 'recap', wpmDefault: '', wpmHi: '', wpmEn: '' });
 
   useEffect(() => {
     const s = settings.data;
@@ -22,7 +22,7 @@ export const SettingsPage = () => {
       confirmAboveUSD: String(s.confirmAboveUSD),
       displayCurrency: s.displayCurrency,
       pricingTier: s.pricingTier,
-      aiProvider: s.aiProvider || 'gemini',
+      aiProvider: 'local',
       defaultTtsProvider: s.defaultTtsProvider,
       narrationLanguage: s.narrationLanguage || 'hi',
       narrationMode: s.narrationMode || 'recap',
@@ -39,8 +39,8 @@ export const SettingsPage = () => {
         confirmAboveUSD: Number(f.confirmAboveUSD),
         displayCurrency: f.displayCurrency as 'USD' | 'INR',
         pricingTier: f.pricingTier as 'standard' | 'batch',
-        aiProvider: f.aiProvider as 'gemini' | 'local',
-        defaultTtsProvider: f.defaultTtsProvider as 'local' | 'gemini',
+        aiProvider: 'local',
+        defaultTtsProvider: 'local',
         narrationLanguage: f.narrationLanguage,
         narrationMode: f.narrationMode as 'original' | 'recap',
         wordsPerMinute: { default: Number(f.wpmDefault), hi: Number(f.wpmHi), en: Number(f.wpmEn) },
@@ -93,12 +93,9 @@ export const SettingsPage = () => {
 
         <section className="space-y-3 rounded-lg border border-line bg-panel p-4">
           <h2 className="text-sm font-medium">Narration & TTS</h2>
-          <Field label="AI provider — story generation" hint="Controls story generation only — scene detection always uses the Python CV service (free). Gemini = paid estimates shown first. Local = Python ai-service (cloud endpoint or ONNX model, free).">
-            <NativeSelect value={f.aiProvider} onChange={(e) => setF({ ...f, aiProvider: e.target.value })}>
-              <option value="gemini">Gemini (cloud)</option>
-              <option value="local">Local (Python service)</option>
-            </NativeSelect>
-          </Field>
+          <div className="rounded-md border border-line bg-panel-2 px-3 py-2 text-[11px] text-muted">
+            Story generation runs on the Python ai-service → <span className="font-mono">free-gemini-api</span> proxy (free, no API key). Scene detection uses the Python CV service.
+          </div>
           <div className="grid grid-cols-2 gap-2">
             <Field label="Narration language" hint="Global — applies to every project.">
               <NativeSelect value={f.narrationLanguage} onChange={(e) => setF({ ...f, narrationLanguage: e.target.value })}>
@@ -112,12 +109,9 @@ export const SettingsPage = () => {
               </NativeSelect>
             </Field>
           </div>
-          <Field label="Default TTS provider">
-            <NativeSelect value={f.defaultTtsProvider} onChange={(e) => setF({ ...f, defaultTtsProvider: e.target.value })}>
-              <option value="local">Local TTS</option>
-              <option value="gemini">Gemini TTS</option>
-            </NativeSelect>
-          </Field>
+          <div className="rounded-md border border-line bg-panel-2 px-3 py-2 text-[11px] text-muted">
+            Voices: local TTS engines (piper/kokoro) via ai-service — cloud TTS was removed.
+          </div>
           <div className="grid grid-cols-3 gap-2">
             <Field label="Hindi wpm"><Input type="number" value={f.wpmHi} onChange={(e) => setF({ ...f, wpmHi: e.target.value })} /></Field>
             <Field label="English wpm"><Input type="number" value={f.wpmEn} onChange={(e) => setF({ ...f, wpmEn: e.target.value })} /></Field>

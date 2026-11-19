@@ -161,24 +161,35 @@ export const detectPanels = async (input: string | Buffer, opts: { rtl?: boolean
 export interface OcrLine {
   text: string;
   confidence: number;
+  /** romanized translation (e.g. Hindi in Latin script) when translation was requested */
+  translated?: string;
+}
+
+export interface OcrResult {
+  lines: OcrLine[][];
+  /** true when the service actually returned translations for every line */
+  translated: boolean;
 }
 
 /** OCR a batch of images via the python ai-service (/ocr). Returns one line array per input image. */
-export const ocrImages = async (images: Buffer[], signal?: AbortSignal): Promise<OcrLine[][]> => {
+export const ocrImages = async (images: Buffer[], opts: { signal?: AbortSignal; translateTo?: string } = {}): Promise<OcrResult> => {
   const base = config.PANEL_DETECT_URL;
-  if (!base || !images.length) return images.map(() => []);
+  if (!base || !images.length) return { lines: images.map(() => []), translated: false };
   try {
     const res = await fetch(`${base}/ocr`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ images: images.map((b) => b.toString('base64')) }),
-      signal: signal || AbortSignal.timeout(180_000),
+      body: JSON.stringify({ images: images.map((b) => b.toString('base64')), translate_to: opts.translateTo }),
+      signal: opts.signal || AbortSignal.timeout(300_000),
     });
     if (!res.ok) throw new Error(`OCR service error ${res.status}: ${(await res.text()).slice(0, 200)}`);
     const data: any = await res.json();
-    return (data?.results || []).map((r: any) => (r?.lines || []).map((l: any) => ({ text: String(l?.text || ''), confidence: Number(l?.confidence) || 0 })));
+    const lines = (data?.results || []).map((r: any) =>
+      (r?.lines || []).map((l: any) => ({ text: String(l?.text || ''), confidence: Number(l?.confidence) || 0, translated: l?.translated ? String(l.translated) : undefined }))
+    );
+    return { lines, translated: !!data?.translated };
   } catch (e: any) {
-    if (signal?.aborted) throw e;
+    if (opts.signal?.aborted) throw e;
     throw new Error(`OCR failed — is the ai-service running with rapidocr installed? (${e.message})`);
   }
 };

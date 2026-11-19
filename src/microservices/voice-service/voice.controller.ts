@@ -9,7 +9,7 @@ import VoiceProfile from 'models/voice-profile.model';
 import StudioSettings from 'models/studio-settings.model';
 import { asyncHandler, assertObjectId, notFound, ok, ownerFilter } from 'libs/studio/http';
 import { enqueueJob, serializeJob } from 'libs/jobs/job.service';
-import { approveEstimate, serializeEstimate } from 'libs/pricing/estimator';
+import { serializeEstimate } from 'libs/pricing/estimator';
 import { getSettings, refreshExchangeRate, serializePrice, listPrices } from 'libs/pricing/pricing.service';
 import { getTtsProvider, TtsVoice } from 'libs/ai/tts';
 import { storeLocalFile, deleteFileById, mediaUrl } from 'libs/studio/media';
@@ -22,9 +22,7 @@ import { estimateTts } from './voice.estimates';
 
 // ------------------------------------------------------------------ voices
 export const voiceStatus = asyncHandler(async (req, res) => {
-  const providers = ['gemini', 'local'] as const;
-  const out: Record<string, any> = {};
-  for (const p of providers) out[p] = { ...(await getTtsProvider(p).status()), configured: getTtsProvider(p).configured };
+  const out: Record<string, any> = { local: { ...(await getTtsProvider('local').status()), configured: getTtsProvider('local').configured } };
   ok(res, { providers: out, localTtsUrl: config.LOCAL_TTS_URL });
 });
 
@@ -33,7 +31,7 @@ export const listVoices = asyncHandler(async (req, res) => {
   const want = String(req.query.provider || 'all');
   const voices: TtsVoice[] = [];
   const errors: Record<string, string> = {};
-  for (const name of ['gemini', 'local'] as const) {
+  for (const name of ['local'] as const) {
     if (want !== 'all' && want !== name) continue;
     try {
       voices.push(...(await getTtsProvider(name).listVoices()));
@@ -138,9 +136,7 @@ export const generateAudio = asyncHandler(async (req, res) => {
   const { segmentIds, provider, voiceId, speed, estimateId } = req.body;
   const segments = await StorySegment.find({ _id: { $in: segmentIds }, project: project._id });
   if (segments.length !== segmentIds.length) throw new AppError('Some narration segments were not found in this project', 400);
-  if (provider === 'gemini') {
-    await approveEstimate(project.owner, estimateId, 'tts', { segmentIds, provider, voiceId, speed });
-  }
+  if (provider === 'gemini') throw new AppError('Gemini TTS was removed — all generation uses the free local service / free-gemini-api proxy. Select a local voice.', 422);
   const docs = await GeneratedAudio.insertMany(
     segments.map((seg) => ({
       owner: project.owner,
@@ -183,9 +179,7 @@ export const regenerateAudio = asyncHandler(async (req, res) => {
     doc.characters = req.body.text.length;
     doc.words = countWords(req.body.text);
   }
-  if (doc.provider === 'gemini') {
-    await approveEstimate(doc.owner, req.body.estimateId, 'tts', { segmentIds: [String(doc.segment)], provider: doc.provider, voiceId: doc.voiceId, speed: doc.speed });
-  }
+  if (doc.provider === 'gemini') throw new AppError('Gemini TTS was removed — switch this clip to a local voice and regenerate.', 422);
   doc.status = 'queued';
   doc.error = undefined;
   await doc.save();

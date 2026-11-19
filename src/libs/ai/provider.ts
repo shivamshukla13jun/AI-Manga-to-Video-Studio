@@ -3,18 +3,23 @@ import config from 'config/env';
 import UsageRecord from 'models/usage-record.model';
 import ProcessingJob from 'models/processing-job.model';
 import { getPrice, tokenCost } from 'libs/pricing/pricing.service';
-import { createInteraction, geminiConfigured, InteractionContent, InteractionUsage } from './gemini.client';
 
 /**
- * Vision-language provider abstraction. Gemini is implemented; other
- * providers (Claude, open-weight VLMs behind an HTTP API) plug in by
- * implementing this interface and registering in `getVisionProvider`.
+ * Vision-language provider abstraction. All generation routes through the
+ * Python ai-service (/generate-json) — backends: STORY_LLM_KIND=freegemini →
+ * free-gemini-api proxy (Gemini web sessions), 'openai' → OpenAI-compatible
+ * endpoint, else the local ONNX VLM. No paid API path exists in this codebase.
  */
+export interface InteractionUsage {
+  inputTokens: number;
+  outputTokens: number;
+  thoughtTokens: number;
+  totalTokens: number;
+}
+
 export interface VisionImage {
   data: Buffer;
   mimeType: string;
-  /** Files API URI — when set, the image is referenced by URI instead of inline base64 */
-  uri?: string;
   /** Short label placed before the image so the model can refer to it */
   label?: string;
 }
@@ -45,64 +50,10 @@ export interface VisionLanguageProvider {
   generateJson<T>(req: JsonRequest): Promise<JsonResult<T>>;
 }
 
-class GeminiVisionProvider implements VisionLanguageProvider {
-  readonly name = 'gemini';
-  /** Set when the API rejects file-URI input — we fall back to inline base64 for the rest of the process. */
-  private fileUrisBroken = false;
-  get configured() {
-    return geminiConfigured();
-  }
-  modelFor(kind: 'vision' | 'text') {
-    return this.modelsFor(kind)[0];
-  }
-  /** Ordered fallback chain for the kind — first model wins, next tried on rate limits */
-  private modelsFor(kind: 'vision' | 'text'): string[] {
-    const list = (kind === 'vision' ? config.GEMINI_VISION_MODELS : config.GEMINI_STORY_MODELS) as string;
-    return list.split(',').map((m) => m.trim()).filter(Boolean);
-  }
-  async generateJson<T>(req: JsonRequest): Promise<JsonResult<T>> {
-    const models = this.modelsFor(req.kind);
-    const buildInput = (useFiles: boolean): InteractionContent[] => {
-      const input: InteractionContent[] = [{ type: 'text', text: req.prompt }];
-      for (const img of req.images || []) {
-        if (img.label) input.push({ type: 'text', text: img.label });
-        input.push(
-          useFiles && img.uri
-            ? { type: 'image', uri: img.uri, mime_type: img.mimeType }
-            : { type: 'image', data: img.data.toString('base64'), mime_type: img.mimeType }
-        );
-      }
-      return input;
-    };
-    const call = (useFiles: boolean) =>
-      createInteraction({
-        model: models,
-        input: buildInput(useFiles),
-        systemInstruction: req.system,
-        schema: req.schema,
-        thinkingLevel: config.GEMINI_THINKING_LEVEL as any,
-        maxOutputTokens: req.maxOutputTokens,
-        signal: req.signal,
-        onLog: req.onLog,
-      });
-    const canUseFiles = !this.fileUrisBroken && (req.images || []).length > 0 && req.images!.every((i) => !!i.uri);
-    let r;
-    try {
-      r = await call(canUseFiles);
-    } catch (e) {
-      if (!canUseFiles) throw e;
-      this.fileUrisBroken = true;
-      await req.onLog?.(`Gemini rejected file-URI input (${(e as Error).message}) — retrying with inline images`, 'warn');
-      r = await call(false);
-    }
-    return { data: r.json as T, usage: r.usage, model: r.model, provider: this.name };
-  }
-}
-
-
 /**
- * Local provider — proxies generation to the Python ai-service
- * (`/generate-json` → local VLM via onnxruntime-genai). Free: no cloud tokens, no Files API.
+ * Routes generation to the Python ai-service `/generate-json`, which in turn
+ * calls the configured backend (free-gemini-api proxy by default). Free: no
+ * cloud API key, no Files API.
  */
 class LocalVisionProvider implements VisionLanguageProvider {
   readonly name = 'local';
@@ -110,12 +61,13 @@ class LocalVisionProvider implements VisionLanguageProvider {
     return !!config.PANEL_DETECT_URL;
   }
   modelFor() {
+    if (config.STORY_LLM_KIND === 'freegemini' && config.STORY_LLM_BASE_URL) return `${config.STORY_LLM_MODEL || 'hydrogen'}@freegemini`;
     return config.LOCAL_STORY_MODEL || 'local-llm';
   }
   async generateJson<T>(req: JsonRequest): Promise<JsonResult<T>> {
-    const base = (config.PANEL_DETECT_URL || 'http://127.0.0.1:8001').replace(/\/+$/, '');
+    const base = (config.PANEL_DETECT_URL || 'http://127.0.0.1:8003').replace(/\/+$/, '');
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 900_000);
+    const timer = config.STORY_LLM_TIMEOUT_MS > 0 ? setTimeout(() => ac.abort(), config.STORY_LLM_TIMEOUT_MS) : undefined;
     const onAbort = () => ac.abort();
     req.signal?.addEventListener('abort', onAbort, { once: true });
     try {
@@ -150,13 +102,10 @@ class LocalVisionProvider implements VisionLanguageProvider {
   }
 }
 
-const providers: Record<string, VisionLanguageProvider> = { gemini: new GeminiVisionProvider(), local: new LocalVisionProvider() };
+const localProvider = new LocalVisionProvider();
 
-export const getVisionProvider = (name = process.env.AI_PROVIDER || 'gemini'): VisionLanguageProvider => {
-  const p = providers[name];
-  if (!p) throw new Error(`Unknown AI provider "${name}". Available: ${Object.keys(providers).join(', ')}`);
-  return p;
-};
+/** The only provider — accepts legacy 'gemini'/'local' names so stored settings can't break. */
+export const getVisionProvider = (_name?: string): VisionLanguageProvider => localProvider;
 
 /** Persist actual usage reported by the provider, priced with the active price list. */
 export const recordUsage = async (opts: {

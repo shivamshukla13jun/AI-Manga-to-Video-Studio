@@ -10,7 +10,7 @@ import CostEstimate from 'models/cost-estimate.model';
 import { asyncHandler, assertObjectId, notFound, ok, ownerFilter } from 'libs/studio/http';
 import { broadcastJob, enqueueJob, serializeJob } from 'libs/jobs/job.service';
 import { emitToUser } from 'libs/realtime/events';
-import { approveEstimate, serializeEstimate } from 'libs/pricing/estimator';
+import { serializeEstimate } from 'libs/pricing/estimator';
 import { getSettings } from 'libs/pricing/pricing.service';
 import { deleteFileById, signMediaPath } from 'libs/studio/media';
 import PdfExport from 'models/pdf-export.model';
@@ -98,7 +98,7 @@ export const projectOverview = asyncHandler(async (req, res) => {
   const expById = new Map(exports.map((e) => [String(e._id), e]));
   ok(res, {
     project: { id: String(project._id), title: project.title, narrationLanguage: language, narrationMode: mode, continuitySummary: project.continuitySummary, continuityThrough: project.continuityThrough },
-    aiConfigured: settings.aiProvider === 'local' || getVisionProvider().configured,
+    aiConfigured: getVisionProvider().configured,
     aiProvider: settings.aiProvider,
     language,
     mode,
@@ -198,9 +198,8 @@ export const generateStory = asyncHandler(async (req, res) => {
   const mode = req.body.mode || settings.narrationMode;
   const count = await MangaChapter.countDocuments({ _id: { $in: chapterIds }, project: project._id });
   if (count !== chapterIds.length) throw new AppError('Some chapters were not found in this project', 400);
-  // Local AI is free — no paid-estimate confirmation needed.
-  const est = settings.aiProvider === 'local' ? undefined : await approveEstimate(project.owner, req.body.estimateId, 'story-generation', { chapterIds, language, mode });
-  const payload = { projectId: String(project._id), chapterIds, language, mode, overwriteEdited: req.body.overwriteEdited, estimateId: est ? String(est._id) : undefined, provider: settings.aiProvider, useOcr: !!req.body.useOcr };
+  // All generation runs on the free local service / free-gemini-api proxy — no estimate gate.
+  const payload = { projectId: String(project._id), chapterIds, language, mode, overwriteEdited: req.body.overwriteEdited, estimateId: req.body.estimateId, provider: settings.aiProvider, useOcr: !!req.body.useOcr };
   const title = `Write ${mode} narration (${language}) — ${chapterIds.length} chapter(s)`;
 
   // Direct mode: run the generation inline so errors surface in this response.
@@ -247,10 +246,6 @@ export const generateStory = asyncHandler(async (req, res) => {
         { new: true }
       );
       if (done) await broadcastJob(done);
-      if (est) {
-        est.job = job._id as Types.ObjectId;
-        await est.save();
-      }
       ok(res, { job: serializeJob(done!), result }, 200);
       return;
     } catch (error: any) {
@@ -273,10 +268,6 @@ export const generateStory = asyncHandler(async (req, res) => {
     target: { kind: 'project', id: project._id as Types.ObjectId },
     idempotencyKey: `story:${project._id}:${language}:${mode}`,
   });
-  if (est) {
-    est.job = job._id as Types.ObjectId;
-    await est.save();
-  }
   ok(res, serializeJob(job), 202);
 });
 
